@@ -169,6 +169,12 @@ revoke/rotate the old Steam key on Steam's developer page after migration.
 
 Your old `games.json` and personal reports are unchanged by indexing.
 
+### Balanced verification (v7)
+
+Full-store verification uses **Balanced mode** by default, for both manual batches and opt-in continuous discovery. Two concurrent network workers share a global adaptive request-start interval (initially 0.9 seconds). Healthy responses gradually decrease the interval to a 0.65-second minimum; transient HTTP 5xx and network errors increase it up to 5 seconds. **HTTP 429 stops the batch, preserves the rate-limited game as pending, and disables automatic discovery until you resume manually.** Only completed observations are committed to SQLite; shutdown or Stop leaves unstarted games pending, and already-checked games are never reset.
+
+The full-store panel shows worker count, current pacing and approximate checked-games-per-hour while a batch runs. This is a cautious improvement, not a promised throughput multiplier or a bypass of Steam rate limits. The 50-game batch limit and Credential Manager key storage remain unchanged.
+
 ### Continuous store discovery (v6)
 
 In **Full Steam store discovery**, click **Continuous discovery: OFF** to opt in.

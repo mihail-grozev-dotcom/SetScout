@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import datetime as dt
 from contextlib import contextmanager
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -26,7 +28,12 @@ URL = 'https://api.steampowered.com/IStoreService/GetAppList/v1/'
 SYNC_PAGE_SIZE = 5000
 SYNC_PAGES_PER_RUN = 24
 SCAN_LIMIT = 50
-SCAN_DELAY = 1.3
+# Balanced verification: two network workers, with globally paced requests.
+SCAN_WORKERS = 2
+SCAN_DELAY = 0.9              # Starting interval between requests, not per worker.
+SCAN_MIN_DELAY = 0.65         # Fastest adaptive interval on healthy responses.
+SCAN_MAX_DELAY = 5.0          # Back off on transient Steam/network failures.
+SCAN_RECOVERY_COUNT = 12      # Gradual recovery; never bypass HTTP 429 stopping.
 AUTO_POLL_SECONDS = 12
 AUTO_BATCH_GAP_SECONDS = 30
 AUTO_REFRESH_SECONDS = 24 * 3600
@@ -35,7 +42,7 @@ LOCK = threading.RLock()
 SYNC_LOCK = threading.Lock()
 SCAN_LOCK = threading.Lock()
 SYNC = {'state': 'idle', 'pages': 0, 'imported': 0, 'error': None}
-SCAN = {'state': 'idle', 'total': 0, 'checked': 0, 'confirmed': 0, 'not_detected': 0, 'errors': 0, 'automatic': False}
+SCAN = {'state': 'idle', 'total': 0, 'checked': 0, 'confirmed': 0, 'not_detected': 0, 'errors': 0, 'automatic': False, 'mode': 'balanced', 'workers': SCAN_WORKERS, 'pacing_seconds': SCAN_DELAY, 'games_per_hour': 0}
 STOP_SYNC = threading.Event()
 STOP_SCAN = threading.Event()
 
@@ -264,44 +271,128 @@ def choose_scan_batch(known: set[int], limit: int = SCAN_LIMIT):
     return rows
 
 
-def _scan_worker(items, check_game, save_result, automatic=False):
+class AdaptivePacer:
+    """Limit aggregate request start rate across workers and react to failures."""
+    def __init__(self):
+        self.delay = SCAN_DELAY
+        self.healthy = 0
+
+    def observe(self, status: str, note: str) -> None:
+        transient = status == 'error' and (
+            bool(re.search(r'\bHTTP (?:408|425|5\d\d)\b', note, re.I))
+            or any(text in note.casefold() for text in ('timeout', 'urlerror', 'connection', 'network')))
+        if transient:
+            self.healthy = 0
+            self.delay = min(SCAN_MAX_DELAY, max(self.delay * 1.75, SCAN_DELAY))
+        elif status in {'confirmed', 'not_detected', 'name_mismatch'}:
+            self.healthy += 1
+            if self.healthy >= SCAN_RECOVERY_COUNT:
+                self.healthy = 0
+                self.delay = max(min(SCAN_MIN_DELAY, SCAN_DELAY), round(self.delay - 0.1, 3))
+        else:
+            self.healthy = 0
+
+
+def _check_indexed_game(item, check_game):
+    """Do only network work on worker threads; persistence is serialized."""
+    appid, name = item
     try:
-        for appid, name in items:
-            if STOP_SCAN.is_set():
-                break
-            try:
-                result = check_game(appid, {'id': appid, 'name': name, 'source': 'Full Steam store index'})
-                status = result['status']
-                if status == 'confirmed':
-                    save_result(result, {'id': appid, 'name': name, 'source': 'Full Steam store index'})
-                note = str(result.get('reason') or '')[:240]
-            except Exception as exc:
-                status, note = 'error', type(exc).__name__
-            # Rate limiting is an unsuccessful check; do NOT mark it as done.
-            # The pending entry should survive until the operator resumes.
-            limited = status == 'error' and 'HTTP 429' in note
-            with LOCK, open_db() as con:
-                if not limited:
-                    con.execute('UPDATE apps SET status=?,checked_at=?,note=? WHERE appid=?',
-                                (status, dt.datetime.now(dt.timezone.utc).isoformat(), note, appid))
-                    con.commit()
-                SCAN['checked'] += 1
-                SCAN['confirmed'] += (status == 'confirmed')
-                SCAN['not_detected'] += (status == 'not_detected')
-                SCAN['errors'] += status not in ('confirmed', 'not_detected')
-                if limited:
-                    SCAN['state'] = 'rate_limited'
-                    if automatic:
-                        set_meta(con, 'auto_enabled', '0')
-                        set_meta(con, 'auto_pause_reason', 'Steam returned HTTP 429. Resume automatic verification manually when the limit clears.')
-                        con.commit()
-            if limited:
-                break
-            if STOP_SCAN.wait(SCAN_DELAY):
-                break
-        with LOCK:
-            if SCAN['state'] == 'running':
-                SCAN['state'] = 'stopped' if STOP_SCAN.is_set() else 'completed'
+        result = check_game(appid, {'id': appid, 'name': name,
+                                    'source': 'Full Steam store index'})
+        if not isinstance(result, dict) or result.get('status') not in {
+                'confirmed', 'not_detected', 'error', 'name_mismatch'}:
+            raise ValueError('Steam checker returned an unexpected status')
+        return result
+    except Exception as exc:
+        return {'id': appid, 'status': 'error', 'reason': type(exc).__name__}
+
+
+def _scan_worker(items, check_game, save_result, automatic=False):
+    """Two concurrent fetches, one aggregate adaptive pacing clock.
+
+    Each selected game is dispatched at most once in this batch. An HTTP 429
+    prevents new launches; at most one already-in-flight request can finish.
+    SQLite writes and game promotions occur on the coordinator thread.
+    """
+    pace = AdaptivePacer()
+    started = time.monotonic()
+    next_request_at = started
+    waiting = {}
+    items_iter = iter(items)
+    exhausted = False
+    halted = False
+    try:
+        with ThreadPoolExecutor(max_workers=SCAN_WORKERS, thread_name_prefix='setscout-balanced') as pool:
+            while waiting or not exhausted:
+                if STOP_SCAN.is_set():
+                    halted = True
+                ready = {f for f in waiting if f.done()}
+                if not ready and not halted and not exhausted and len(waiting) < SCAN_WORKERS:
+                    delay = max(0.0, next_request_at - time.monotonic())
+                    if waiting and delay:
+                        ready, _ = wait(waiting, timeout=delay, return_when=FIRST_COMPLETED)
+                    elif delay and STOP_SCAN.wait(delay):
+                        halted = True
+                    if STOP_SCAN.is_set():
+                        halted = True
+                    if not ready and not halted:
+                        try:
+                            item = next(items_iter)
+                        except StopIteration:
+                            exhausted = True
+                        else:
+                            waiting[pool.submit(_check_indexed_game, item, check_game)] = item
+                            next_request_at = time.monotonic() + pace.delay
+                            continue
+                if waiting:
+                    if not ready:
+                        ready, _ = wait(waiting, return_when=FIRST_COMPLETED)
+                    for future in ready:
+                        appid, name = waiting.pop(future)
+                        result = future.result()
+                        status = result['status']
+                        note = str(result.get('reason') or '')[:240]
+                        limited = status == 'error' and 'HTTP 429' in note
+                        if status == 'confirmed':
+                            try:
+                                save_result(result, {'id': appid, 'name': name,
+                                                     'source': 'Full Steam store index'})
+                            except Exception as exc:
+                                status = 'error'
+                                note = 'SaveError: ' + type(exc).__name__
+                        with LOCK, open_db() as con:
+                            if not limited:
+                                con.execute('UPDATE apps SET status=?,checked_at=?,note=? WHERE appid=?',
+                                            (status, dt.datetime.now(dt.timezone.utc).isoformat(), note, appid))
+                            SCAN['checked'] += 1
+                            SCAN['confirmed'] += status == 'confirmed'
+                            SCAN['not_detected'] += status == 'not_detected'
+                            SCAN['errors'] += status not in {'confirmed', 'not_detected'}
+                            if limited:
+                                halted = True
+                                SCAN['state'] = 'rate_limited'
+                                if automatic:
+                                    set_meta(con, 'auto_enabled', '0')
+                                    set_meta(con, 'auto_pause_reason',
+                                             'Steam returned HTTP 429. Resume automatic verification manually when the limit clears.')
+                            con.commit()
+                        if not limited:
+                            previous_delay = pace.delay
+                            pace.observe(status, note)
+                            # Only postpone the next launch on a backoff; healthy
+                            # completions must not add another full request gap.
+                            if pace.delay > previous_delay:
+                                next_request_at = max(next_request_at, time.monotonic() + pace.delay)
+                        with LOCK:
+                            SCAN['pacing_seconds'] = round(pace.delay, 2)
+                            elapsed = time.monotonic() - started
+                            if SCAN['checked'] >= 3 and elapsed > 0:
+                                SCAN['games_per_hour'] = round(SCAN['checked'] / elapsed * 3600)
+                elif halted or exhausted:
+                    break
+            with LOCK:
+                if SCAN['state'] == 'running':
+                    SCAN['state'] = 'stopped' if STOP_SCAN.is_set() else 'completed'
     except Exception as exc:
         with LOCK:
             SCAN['state'] = 'error'
@@ -309,8 +400,8 @@ def _scan_worker(items, check_game, save_result, automatic=False):
             if automatic:
                 with open_db() as con:
                     set_meta(con, 'auto_enabled', '0')
-                    set_meta(con, 'auto_pause_reason', 'Automatic verification encountered an unexpected error; resume manually.')
-                    con.commit()
+                    set_meta(con, 'auto_pause_reason',
+                             'Automatic verification encountered an unexpected error; resume manually.')
     finally:
         if automatic:
             with LOCK, open_db() as con:
@@ -328,7 +419,8 @@ def start_scan(known: set[int], check_game, save_result, automatic: bool = False
         with LOCK:
             SCAN = {'state': 'running' if items else 'completed', 'total': len(items),
                     'checked': 0, 'confirmed': 0, 'not_detected': 0, 'errors': 0,
-                    'automatic': bool(automatic)}
+                    'automatic': bool(automatic), 'mode': 'balanced',
+                    'workers': SCAN_WORKERS, 'pacing_seconds': SCAN_DELAY, 'games_per_hour': 0}
         STOP_SCAN.clear()
         if items:
             threading.Thread(target=_scan_worker,

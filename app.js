@@ -148,13 +148,13 @@ function renderStoreIndex(){
   $('storeScanBtn').disabled=!state.backend||active||!x.pending;
   $('storeStopBtn').disabled=!state.backend||!active;
   $('storeStats').textContent=`Indexed: ${Number(x.total||0).toLocaleString()} games · Not checked: ${Number(x.pending||0).toLocaleString()} · Verified sets: ${Number(x.confirmed||0)} · Checked without evidence: ${Number(x.not_detected||0)} · Errors: ${Number(x.errors||0)} · ${x.index_complete?'Full index complete':'Initial index incomplete'}${x.last_refresh?' · Last refresh: '+timeLabel(x.last_refresh):''}`;
-  $('storeAutoStatus').textContent=x.auto_pause_reason?`Automation paused: ${x.auto_pause_reason}`:x.auto_enabled?'Continuous mode enabled: verifying up to 50 games per batch while Python runs; refreshing the store once every 24 hours.':'Continuous mode is OFF. Enable it to process the index automatically while Python runs.';
+  $('storeAutoStatus').textContent=x.auto_pause_reason?`Automation paused: ${x.auto_pause_reason}`:x.auto_enabled?'Continuous mode enabled · Balanced (2 workers): up to 50 games per batch, adaptive pacing and an automatic stop on Steam rate limiting.':'Continuous mode is OFF · Balanced (2 workers) is used for manual or automatic indexed scans.';
   $('storeProgress').hidden=!active && !(sync.state==='error'||scan.state==='error'||scan.state==='rate_limited');
   if(sync.state==='running'||sync.state==='error'){
     $('storeProgressText').textContent=`${sync.mode==='refresh'?'Incremental refresh':'Store indexing'}: ${sync.pages||0} pages, ${Number(sync.imported||0).toLocaleString()} items processed this run${sync.error?' · '+sync.error:''}`;
     $('storeMeter').value=0;$('storeMeter').max=1;
   }else if(scan.state!=='idle'){
-    $('storeProgressText').textContent=`Verification${scan.automatic?' (automatic)':''}: ${scan.checked||0}/${scan.total||0} checked · ${scan.confirmed||0} confirmed${scan.state==='rate_limited'?' · Steam rate limited; current game remains pending':''}`;
+    $('storeProgressText').textContent=`Balanced verification${scan.automatic?' (automatic)':''}: ${scan.checked||0}/${scan.total||0} checked · ${scan.confirmed||0} confirmed · ${scan.workers||2} workers · ${Number(scan.pacing_seconds??0.9).toFixed(2)}s pacing${scan.games_per_hour?` · ~${Number(scan.games_per_hour).toLocaleString()}/hour`:''}${scan.state==='rate_limited'?' · Steam rate limited; pending game preserved':''}`;
     $('storeMeter').value=scan.checked||0;$('storeMeter').max=Math.max(1,scan.total||1);
   }
 }
