@@ -52,6 +52,12 @@ At startup, SetScout automatically repairs **only** the wrongly named legacy ent
 
 The checker also compares the title of a recognizable Steam achievements page with the catalogue name. An unrelated title is no longer marked as Steam verified.
 
+## Pending candidate queue
+
+The **Awaiting check** counter shows only candidates that have never been scanned. Unlike earlier versions, it no longer counts already checked candidates. Select **Scan queued candidates** to verify each waiting App ID once in a throttled batch. Positive confirmations join the main game catalogue. Nonmatches and failed checks remain in **Checked candidates**, preserving their evidence for later investigation rather than incorrectly declaring the game unsupported.
+
+The scanner stops its batch on an HTTP 429 Steam rate-limit response and leaves remaining entries in Awaiting check. Retry when Steam is accepting requests again. Automatic discovery may add new pending games, so the waiting number can grow even after a successful scan. **Check all unverified** remains a separate feature for games already in the main catalogue.
+
 ## Your data stays local
 
 On first startup, the server creates **`games.json`** from the included **`games.example.json`**. This local file stores your discovered games, verification history, reports, and activity records. Browser `localStorage` holds your starred watchlist and notification state.

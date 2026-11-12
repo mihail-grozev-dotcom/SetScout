@@ -566,6 +566,18 @@ def refresh_candidates() -> dict:
     return statuses
 
 
+def is_pending_candidate(candidate: dict) -> bool:
+    """An untouched candidate awaits its first check; checked nonmatches stay in history."""
+    return candidate.get('status', 'pending') == 'pending' and not candidate.get('checked_at')
+
+
+def candidate_counts(candidates: list[dict]) -> dict:
+    """Present meaningful queue counts without deleting inconclusive evidence."""
+    return {'pending': sum(is_pending_candidate(c) for c in candidates),
+            'not_detected': sum(c.get('status') == 'not_detected' for c in candidates),
+            'errors': sum(c.get('status') in {'error', 'name_mismatch'} for c in candidates)}
+
+
 def pick_candidates(limit: int, check_known: bool = False) -> list[dict]:
     db = read_db()
     if check_known:
@@ -635,11 +647,13 @@ def bulk_snapshot() -> dict:
     with BULK_STATE_LOCK:
         snapshot = dict(BULK_PROGRESS)
         snapshot['cancel_requested'] = BULK_CANCEL.is_set() if snapshot['state'] == 'running' else False
-    snapshot['remaining_unverified'] = sum(not g.get('verified') for g in read_db()['games'])
+    db = read_db()
+    snapshot['remaining_unverified'] = sum(not g.get('verified') for g in db['games'])
+    snapshot['remaining_pending'] = candidate_counts(db['candidates'])['pending']
     return snapshot
 
 
-def _run_unverified_worker(items: list[dict]) -> None:
+def _run_bulk_worker(items: list[dict]) -> None:
     """Process a fixed, deduplicated snapshot without reselecting failed games."""
     try:
         for index, game in enumerate(items):
@@ -663,6 +677,12 @@ def _run_unverified_worker(items: list[dict]) -> None:
                 BULK_PROGRESS['errors'] += status not in {'confirmed', 'not_detected'}
                 BULK_PROGRESS['last_game'] = game.get('name', f"Steam App {game['id']}")
                 BULK_PROGRESS['last_status'] = status
+            # Pause rather than hammering Steam after an explicit rate-limit response.
+            if status == 'error' and 'HTTP 429' in checked.get('reason', ''):
+                with BULK_STATE_LOCK:
+                    BULK_PROGRESS['state'] = 'rate_limited'
+                    BULK_PROGRESS['error'] = 'Steam returned HTTP 429 (rate limited). Remaining candidates were left queued; retry later.'
+                break
             if index < len(items) - 1 and BULK_CANCEL.wait(BULK_PAUSE_SECONDS):
                 break
     except Exception as exc:
@@ -677,30 +697,37 @@ def _run_unverified_worker(items: list[dict]) -> None:
         SCAN_LOCK.release()
 
 
-def start_unverified_scan() -> dict:
-    """Start a nonblocking scan of each currently unverified listed App ID once."""
+def start_bulk_scan(mode: str) -> dict:
+    """Check each item in the selected snapshot once, preserving inconclusive candidates."""
     global BULK_PROGRESS
+    if mode not in {'unverified', 'candidates'}:
+        raise ValueError('Unknown bulk scan mode.')
+    # Prevent overlapping automatic, single, and bulk scans.
     if not SCAN_LOCK.acquire(blocking=False):
         return {'error': 'Another scan is already running.'}
     try:
+        db = read_db()
+        source = (g for g in db['games'] if not g.get('verified')) if mode == 'unverified' else \
+                 (c for c in db['candidates'] if is_pending_candidate(c))
         seen = set()
         items = []
-        for g in read_db()['games']:
-            appid = int(g['id'])
-            if not g.get('verified') and appid not in seen:
-                items.append(g.copy())
+        for item in source:
+            appid = int(item['id'])
+            if appid not in seen:
+                items.append(item.copy())
                 seen.add(appid)
         items.sort(key=lambda g: (bool(g.get('checked_at')), parse_date(g.get('checked_at')), int(g['id'])))
         BULK_CANCEL.clear()
         with BULK_STATE_LOCK:
             BULK_PROGRESS = {'state': 'running' if items else 'completed',
-                             'total': len(items), 'completed': 0, 'confirmed': 0,
-                             'not_detected': 0, 'errors': 0, 'started_at': now(),
-                             'finished_at': None, 'last_game': None, 'last_status': None}
-            response = {**BULK_PROGRESS, 'remaining_unverified': len(items), 'cancel_requested': False}
+                             'mode': mode, 'total': len(items), 'completed': 0,
+                             'confirmed': 0, 'not_detected': 0, 'errors': 0,
+                             'started_at': now(), 'finished_at': None,
+                             'last_game': None, 'last_status': None}
+            response = {**BULK_PROGRESS, 'cancel_requested': False}
         if items:
-            threading.Thread(target=_run_unverified_worker, args=(items,), daemon=True,
-                             name='setscout-unverified-scan').start()
+            threading.Thread(target=_run_bulk_worker, args=(items,), daemon=True,
+                             name=f'setscout-{mode}-scan').start()
         else:
             SCAN_LOCK.release()
         return response
@@ -708,6 +735,13 @@ def start_unverified_scan() -> dict:
         SCAN_LOCK.release()
         raise
 
+
+def start_unverified_scan() -> dict:
+    return start_bulk_scan('unverified')
+
+
+def start_pending_scan() -> dict:
+    return start_bulk_scan('candidates')
 
 def cancel_unverified_scan() -> dict:
     """Signal graceful stop after the current Steam request finishes."""
@@ -736,7 +770,7 @@ class Handler(SimpleHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == '/api/games':
             db = read_db()
-            return self.json_response({**{k: db.get(k) for k in ('games', 'candidates', 'events', 'updated_at', 'auto_enabled', 'auto_hours', 'scan')}, 'bulk': bulk_snapshot()})
+            return self.json_response({**{k: db.get(k) for k in ('games', 'candidates', 'events', 'updated_at', 'auto_enabled', 'auto_hours', 'scan')}, 'bulk': bulk_snapshot(), 'candidate_counts': candidate_counts(db['candidates'])})
         if path == '/api/bulk-status':
             return self.json_response(bulk_snapshot())
         if path == '/api/status':
@@ -748,7 +782,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {'/api/check', '/api/scan', '/api/discover', '/api/settings', '/api/import', '/api/report', '/api/delete-report', '/api/scan-unverified', '/api/cancel-unverified'}:
+        if path not in {'/api/check', '/api/scan', '/api/discover', '/api/settings', '/api/import', '/api/report', '/api/delete-report', '/api/scan-unverified', '/api/scan-pending', '/api/cancel-unverified'}:
             return self.json_response({'error': 'Unknown action'}, 404)
         try:
             if self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json':
@@ -764,6 +798,9 @@ class Handler(SimpleHTTPRequestHandler):
                 raise ValueError('Expected JSON object')
             if path == '/api/scan-unverified':
                 result = start_unverified_scan()
+                return self.json_response(result, 409 if 'error' in result else 200)
+            if path == '/api/scan-pending':
+                result = start_pending_scan()
                 return self.json_response(result, 409 if 'error' in result else 200)
             if path == '/api/cancel-unverified':
                 result = cancel_unverified_scan()

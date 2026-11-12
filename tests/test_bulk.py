@@ -46,7 +46,7 @@ class BulkScanTests(unittest.TestCase):
         def fake_check(appid, game):
             calls.append(appid)
             if appid == 3:
-                return {'id': appid, 'status': 'error', 'checked_at': server.now(), 'reason': 'HTTP 429'}
+                return {'id': appid, 'status': 'error', 'checked_at': server.now(), 'reason': 'HTTP 500'}
             return {'id': appid, 'name': game['name'], 'status': 'confirmed',
                     'verified': True, 'set_count': 2, 'types': ['Modes'],
                     'checked_at': server.now()}

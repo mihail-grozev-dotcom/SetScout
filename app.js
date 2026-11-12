@@ -35,10 +35,12 @@ function sourceLabel(g){return g.verified?'STEAM VERIFIED':g.source==='Valve lau
 function toast(message){const x=$('toast');x.textContent=message;x.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>x.classList.remove('show'),5200)}
 function openModal(id){$(id).classList.add('open')}
 function closeModal(id){$(id).classList.remove('open')}
+const candidatePending=c=>(!c.status||c.status==='pending')&&!c.checked_at;
 function itemsForFilter(){
-  if(state.filter==='pending'){
+  if(['pending','reviewed'].includes(state.filter)){
     const local=state.pending.filter(p=>!state.games.some(g=>Number(g.id)===Number(p.id)));
-    return state.backend?[...state.candidates,...local.filter(p=>!state.candidates.some(c=>Number(c.id)===Number(p.id)))]:local;
+    const all=state.backend?[...state.candidates,...local.filter(p=>!state.candidates.some(c=>Number(c.id)===Number(p.id)))]:local;
+    return all.filter(c=>state.filter==='pending'?candidatePending(c):!candidatePending(c));
   }
   return state.games;
 }
@@ -77,6 +79,9 @@ function renderGame(g){
   if(v.passed)flags+=tag('Deadline passed · unverified','deadline');
   if(v.unknown)flags+=tag('Time limit unknown','unknown');
   if(g.verified)flags+=tag('Steam page checked','check');
+  if(g.status==='not_detected')flags+=tag('Checked · sets not detected','unknown');
+  else if(g.status==='error')flags+=tag('Check failed · retry later','deadline');
+  else if(g.status==='name_mismatch')flags+=tag('Title mismatch · investigate','deadline');
   const status=v.active?`<span>◉</span> Limited-time: user-reported${v.next?` · ends ${e(v.next.toLocaleString())}`:''}`:archival?`<span>◈</span> Archive evidence exists`:v.passed?`<span>◷</span> Deadline passed; archival unverified`:`<span>○</span> No reliable time-limit information`;
   const date=`Last checked: ${e(timeLabel(g.checked_at))}`;
   return `<article class="game"><div class="cover"><img loading="lazy" src="${imageURL(g)}" alt="" onerror="this.style.display='none'"><button class="mark ${saved?'on':''}" data-save="${g.id}" aria-label="${saved?'Remove saved game':'Save game'}">${saved?'★':'☆'}</button><span class="source-pill">${e(sourceLabel(g))}</span></div>
@@ -92,9 +97,9 @@ function render(){
   $('deadlineCount').textContent=state.games.filter(g=>temporal(g).upcoming).length;
   $('archiveCount').textContent=state.games.filter(g=>temporal(g).archived).length;
   $('filterStatus').textContent=`Showing ${games.length} of ${all.length} titles`;
-  const titles={limited:'Reported active limited-time',deadline:'Upcoming deadlines',archived:'Archive evidence',unknown:'Status unknown',pending:'Candidate queue',saved:'My saved games'};
+  const titles={limited:'Reported active limited-time',deadline:'Upcoming deadlines',archived:'Archive evidence',unknown:'Status unknown',pending:'Awaiting first check',reviewed:'Checked · not confirmed',saved:'My saved games'};
   $('catalogTitle').textContent=titles[state.filter]||'Explore games';
-  $('catalogSubtitle').textContent=state.filter==='pending'?'Candidates are not confirmed to have custom Achievement Sets.':'Click Track / details to add a source-linked time-sensitive report.';
+  $('catalogSubtitle').textContent=state.filter==='pending'?'Games awaiting their first Steam check. Scanning moves them into confirmed games or checked candidates.':state.filter==='reviewed'?'Previously checked candidates remain here because a failed or inconclusive scan cannot prove they lack custom sets.':'Click Track / details to add a source-linked time-sensitive report.';
   document.querySelectorAll('#chips [data-filter]').forEach(c=>c.classList.toggle('active',c.dataset.filter===state.filter));
   $('grid').innerHTML=games.length?games.map(renderGame).join(''):`<div class="empty"><h3>Nothing found</h3><p>Try another filter or add an evidence-backed report for a game.</p><button class="btn" id="clearBtn">Clear filters</button></div>`;
   if($('clearBtn'))$('clearBtn').onclick=()=>{state.filter='all';state.search='';$('search').value='';render()};
@@ -103,9 +108,14 @@ function render(){
 function renderScanner(){
   const on=state.backend,bulk=state.bulk||{state:'idle'};
   const running=bulk.state==='running',unverified=state.games.filter(g=>!g.verified).length;
+  const pending=state.candidates.filter(candidatePending).length;
+  const checked=state.candidates.filter(c=>c.status==='not_detected').length;
+  const errors=state.candidates.filter(c=>c.status==='error'||c.status==='name_mismatch').length;
   $('autoBadge').textContent=on?(state.auto?'AUTO: ON':'AUTO: OFF'):'SERVER OFFLINE';
   $('autoBadge').classList.toggle('off',!on||!state.auto);
   for(const id of ['discoverBtn','scanBtn','autoBtn','importBtn'])$(id).disabled=!on||state.busy||running;
+  $('queueBtn').disabled=!on||state.busy||running||pending===0;
+  $('queueBtn').textContent=`▶ Scan queued candidates (${pending})`;
   $('checkAllBtn').disabled=!on||state.busy||running||unverified===0;
   $('checkAllBtn').textContent=`✓ Check all unverified (${unverified})`;
   $('cancelAllBtn').hidden=!on||!running;
@@ -118,14 +128,15 @@ function renderScanner(){
     const total=Number(bulk.total||0),completed=Number(bulk.completed||0);
     $('bulkMeter').max=Math.max(total,1);
     $('bulkMeter').value=completed;
-    const statusText={running:'Checking',completed:'Finished',cancelled:'Stopped',error:'Stopped due to error'}[bulk.state]||'Ready';
-    $('bulkStatus').textContent=`${statusText} ${completed} of ${total} games · ${Number(bulk.confirmed||0)} verified · ${Number(bulk.not_detected||0)} not detected · ${Number(bulk.errors||0)} errors${bulk.cancel_requested?' · stopping…':''}`;
-    $('bulkLastGame').textContent=bulk.error|| (bulk.last_game?`Last: ${bulk.last_game} (${bulk.last_status||'checked'})`:'Each unverified game will be checked once in this run.');
+    const statusText={running:'Checking',completed:'Finished',cancelled:'Stopped',error:'Stopped due to error',rate_limited:'Paused · Steam rate limited'}[bulk.state]||'Ready';
+    const target=bulk.mode==='candidates'?'candidates':'listed games';
+    $('bulkStatus').textContent=`${statusText} ${completed} of ${total} ${target} · ${Number(bulk.confirmed||0)} verified · ${Number(bulk.not_detected||0)} not detected · ${Number(bulk.errors||0)} errors${bulk.cancel_requested?' · stopping…':''}`;
+    $('bulkLastGame').textContent=bulk.error|| (bulk.last_game?`Last: ${bulk.last_game} (${bulk.last_status||'checked'})`:'Each item will be checked once in this run.');
   }
   if(!on)return;
   const src=state.scan?.last_sources||{};
   const feeds=Object.entries(src).map(([name,x])=>`${e(name)}: ${x.ok?`${Number(x.seen||0)} candidates`:'unavailable'}`).join(' · ');
-  $('scanInfo').innerHTML=`<strong>Last scan:</strong> ${e(timeLabel(state.scan?.last_run))} · <strong>Queued:</strong> ${state.candidates.length} · <strong>Automatic:</strong> 8 candidates + 8 known games every ${state.autoHours}h while Python is running.${feeds?`<div>${feeds}</div>`:''}`;
+  $('scanInfo').innerHTML=`<strong>Last scan:</strong> ${e(timeLabel(state.scan?.last_run))} · <strong>Awaiting check:</strong> ${pending} · <strong>Checked, not detected:</strong> ${checked} · <strong>Check errors/mismatches:</strong> ${errors} · <strong>Automatic:</strong> 8 candidates + 8 known games every ${state.autoHours}h while Python is running.${feeds?`<div>${feeds}</div>`:''}`;
 }
 function renderActivity(){
   $('eventFilterBtn').textContent=state.onlyWatchEvents?'★ Watching only':'All games';
@@ -236,7 +247,7 @@ async function loadData(){
     }
     state.auto=data.auto_enabled!==false;state.autoHours=data.auto_hours||6;state.scan=data.scan||{};
     const previous=state.bulk?.state;state.bulk=data.bulk||{state:'idle'};
-    if(previous==='running'&&['completed','cancelled','error'].includes(state.bulk.state))toast(`Bulk scan ${state.bulk.state}: ${state.bulk.completed}/${state.bulk.total} checked.`);
+    if(previous==='running'&&['completed','cancelled','error','rate_limited'].includes(state.bulk.state))toast(`Bulk scan ${state.bulk.state}: ${state.bulk.completed}/${state.bulk.total} checked.`);
     $('serverBanner').classList.remove('hidden');$('serverBanner').textContent='● Local Python server connected. Steam page checks are experimental; externally sourced limited-time reports remain user-reported. Automatic scans run only while the server stays open.';
     notifyNewEvents();
   }catch{
@@ -253,6 +264,16 @@ async function runScan(mode){
     $('scanResults').innerHTML=`<strong>${Number(data.new_games||0)} new confirmed</strong> · ${Number(data.checked||0)} checked · ${Number(data.errors||0)} errors · ${Number(data.not_detected||0)} without positive evidence. ${missing.length?`Feeds unavailable: ${e(missing.join(', '))}`:''}`;
     toast('Steam check completed. Review time-sensitive updates in Activity.');
   }catch(err){$('scanResults').textContent=`Scan failed: ${err.message}`}finally{state.busy=false;renderScanner()}
+}
+async function checkPendingQueue(){
+  if(!state.backend||state.busy||state.bulk?.state==='running')return;
+  state.busy=true;renderScanner();
+  try{
+    const started=await post('/api/scan-pending',{});
+    await loadData();
+    $('scanResults').textContent=`Candidate scan started: ${Number(started.total||0)} awaiting first check. Verified games join the main catalogue; others move into Checked candidates.`;
+  }catch(err){$('scanResults').textContent=`Candidate scan failed: ${err.message}`}
+  finally{state.busy=false;renderScanner()}
 }
 async function checkAllUnverified(){
   if(!state.backend||state.busy||state.bulk?.state==='running')return;
@@ -280,6 +301,7 @@ $('addBtn').onclick=()=>{openModal('addOverlay');$('steamInput').focus()};
 $('checkBtn').onclick=check;
 $('discoverBtn').onclick=()=>runScan('discover');
 $('scanBtn').onclick=()=>runScan('recheck');
+$('queueBtn').onclick=checkPendingQueue;
 $('checkAllBtn').onclick=checkAllUnverified;
 $('cancelAllBtn').onclick=stopBulkScan;
 $('autoBtn').onclick=toggleAuto;
