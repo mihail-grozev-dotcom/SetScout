@@ -1,0 +1,29 @@
+# Local user data: scan history, reports, and imported games
+/games.json
+/games.json.*
+!games.example.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Credentials, local configuration and output
+.env
+.env.*
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local-generated bundles and previews
+*.zip
+/preview*.png
