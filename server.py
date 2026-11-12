@@ -797,7 +797,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {'/api/check', '/api/scan', '/api/discover', '/api/settings', '/api/import', '/api/report', '/api/delete-report', '/api/scan-unverified', '/api/scan-pending', '/api/cancel-unverified', '/api/store-sync', '/api/store-scan', '/api/store-stop'}:
+        if path not in {'/api/check', '/api/scan', '/api/discover', '/api/settings', '/api/import', '/api/report', '/api/delete-report', '/api/scan-unverified', '/api/scan-pending', '/api/cancel-unverified', '/api/store-sync', '/api/store-scan', '/api/store-stop', '/api/store-auto'}:
             return self.json_response({'error': 'Unknown action'}, 404)
         try:
             if self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json':
@@ -811,6 +811,10 @@ class Handler(SimpleHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b'{}')
             if not isinstance(payload, dict):
                 raise ValueError('Expected JSON object')
+            if path == '/api/store-auto':
+                if not isinstance(payload.get('enabled'), bool):
+                    raise ValueError('enabled must be true or false')
+                return self.json_response(store_index.set_auto_enabled(payload['enabled']))
             if path == '/api/store-sync':
                 return self.json_response(store_index.start_sync())
             if path == '/api/store-scan':
@@ -871,7 +875,13 @@ def main():
     stop = threading.Event()
     scheduler = threading.Thread(target=background_scanner, args=(stop,), daemon=True)
     scheduler.start()
-    print(f'\nSetScout v4 — http://127.0.0.1:{PORT}')
+    store_scheduler = threading.Thread(
+        target=store_index.automation_loop,
+        args=(stop, lambda: {int(g['id']) for g in read_db()['games']},
+              check_game, save_result, SCAN_LOCK.locked),
+        daemon=True, name='setscout-store-automation')
+    store_scheduler.start()
+    print(f'\nSetScout v6 — http://127.0.0.1:{PORT}')
     print('Open the URL above. Automatic scans are enabled by default while the server is running.')
     print('Discovery: public feeds, 8 candidate + 8 known checks / 6 hours; local activity feed.')
     print('Steam may throttle checks. Ctrl+C stops the app and background scans.\n')
@@ -882,7 +892,7 @@ def main():
     finally:
         stop.set()
         BULK_CANCEL.set()
-        store_index.stop()
+        store_index.shutdown()
         server.server_close()
 
 if __name__ == '__main__':

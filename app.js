@@ -1,5 +1,5 @@
 'use strict';
-/* SetScout v4 — zero-dependency local interface; no credentials or telemetry. */
+/* SetScout v6 — zero-dependency local interface; no credentials or telemetry. */
 const $=id=>document.getElementById(id);
 const safeStore={
   get(k,def){try{return JSON.parse(localStorage.getItem(k))??def}catch{return def}},
@@ -141,17 +141,20 @@ function renderScanner(){
 function renderStoreIndex(){
   const x=state.store||{},sync=x.sync||{},scan=x.scan||{},active=sync.state==='running'||scan.state==='running';
   $('storeKeyBadge').textContent=!state.backend?'SERVER OFFLINE':x.key_configured?'KEY CONFIGURED':'API KEY MISSING';
-  $('storeSyncBtn').disabled=!state.backend||!x.key_configured||active||x.index_complete;
-  $('storeSyncBtn').textContent=x.index_complete?'Store index complete':'Index / resume store catalogue';
+  $('storeSyncBtn').disabled=!state.backend||!x.key_configured||active;
+  $('storeSyncBtn').textContent=x.index_complete?'Refresh Steam catalogue':'Index / resume store catalogue';
+  $('storeAutoBtn').disabled=!state.backend||!x.key_configured;
+  $('storeAutoBtn').textContent=x.auto_enabled?'● Continuous discovery: ON':'○ Continuous discovery: OFF';
   $('storeScanBtn').disabled=!state.backend||active||!x.pending;
   $('storeStopBtn').disabled=!state.backend||!active;
-  $('storeStats').textContent=`Indexed: ${Number(x.total||0).toLocaleString()} games · Not checked: ${Number(x.pending||0).toLocaleString()} · Verified sets: ${Number(x.confirmed||0)} · Checked without evidence: ${Number(x.not_detected||0)} · Errors: ${Number(x.errors||0)}${x.index_complete?' · Full index complete':' · Index in progress / incomplete'}`;
+  $('storeStats').textContent=`Indexed: ${Number(x.total||0).toLocaleString()} games · Not checked: ${Number(x.pending||0).toLocaleString()} · Verified sets: ${Number(x.confirmed||0)} · Checked without evidence: ${Number(x.not_detected||0)} · Errors: ${Number(x.errors||0)} · ${x.index_complete?'Full index complete':'Initial index incomplete'}${x.last_refresh?' · Last refresh: '+timeLabel(x.last_refresh):''}`;
+  $('storeAutoStatus').textContent=x.auto_pause_reason?`Automation paused: ${x.auto_pause_reason}`:x.auto_enabled?'Continuous mode enabled: verifying up to 50 games per batch while Python runs; refreshing the store once every 24 hours.':'Continuous mode is OFF. Enable it to process the index automatically while Python runs.';
   $('storeProgress').hidden=!active && !(sync.state==='error'||scan.state==='error'||scan.state==='rate_limited');
   if(sync.state==='running'||sync.state==='error'){
-    $('storeProgressText').textContent=`Store indexing: ${sync.pages||0} pages, ${Number(sync.imported||0).toLocaleString()} games added this run${sync.error?' · '+sync.error:''}`;
+    $('storeProgressText').textContent=`${sync.mode==='refresh'?'Incremental refresh':'Store indexing'}: ${sync.pages||0} pages, ${Number(sync.imported||0).toLocaleString()} items processed this run${sync.error?' · '+sync.error:''}`;
     $('storeMeter').value=0;$('storeMeter').max=1;
   }else if(scan.state!=='idle'){
-    $('storeProgressText').textContent=`Verification: ${scan.checked||0}/${scan.total||0} checked · ${scan.confirmed||0} confirmed${scan.state==='rate_limited'?' · Steam rate limited':''}`;
+    $('storeProgressText').textContent=`Verification${scan.automatic?' (automatic)':''}: ${scan.checked||0}/${scan.total||0} checked · ${scan.confirmed||0} confirmed${scan.state==='rate_limited'?' · Steam rate limited; current game remains pending':''}`;
     $('storeMeter').value=scan.checked||0;$('storeMeter').max=Math.max(1,scan.total||1);
   }
 }
@@ -159,6 +162,17 @@ async function storeCommand(action){
   const paths={sync:'/api/store-sync',scan:'/api/store-scan',stop:'/api/store-stop'};
   try{await post(paths[action],{});await loadData()}
   catch(err){toast('Store discovery: '+err.message)}
+}
+async function toggleStoreAuto(){
+  if(!state.backend)return;
+  const enabled=!state.store?.auto_enabled;
+  $('storeAutoBtn').disabled=true;
+  try{
+    const result=await post('/api/store-auto',{enabled});
+    state.store=result;renderStoreIndex();
+    toast(enabled?'Continuous Steam discovery enabled while SetScout is running.':'Continuous Steam discovery paused.');
+  }catch(err){toast('Store discovery: '+err.message)}
+  finally{$('storeAutoBtn').disabled=false}
 }
 function renderActivity(){
   $('eventFilterBtn').textContent=state.onlyWatchEvents?'★ Watching only':'All games';
@@ -328,6 +342,7 @@ $('checkAllBtn').onclick=checkAllUnverified;
 $('storeSyncBtn').onclick=()=>storeCommand('sync');
 $('storeScanBtn').onclick=()=>storeCommand('scan');
 $('storeStopBtn').onclick=()=>storeCommand('stop');
+$('storeAutoBtn').onclick=toggleStoreAuto;
 $('cancelAllBtn').onclick=stopBulkScan;
 $('autoBtn').onclick=toggleAuto;
 $('importBtn').onclick=()=>openModal('importOverlay');
@@ -341,7 +356,7 @@ $('eventFilterBtn').onclick=()=>{state.onlyWatchEvents=!state.onlyWatchEvents;re
 $('exportBtn').onclick=()=>{
   const games=state.games.filter(g=>state.saved.has(String(g.id)));
   const json=JSON.stringify({exported_at:new Date().toISOString(),saved_games:games,events:state.events.filter(x=>state.saved.has(String(x.appid)))},null,2);
-  const url=URL.createObjectURL(new Blob([json],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='setscout-v3-watchlist.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1500);
+  const url=URL.createObjectURL(new Blob([json],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='setscout-v6-watchlist.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1500);
 };
 document.querySelectorAll('[data-close]').forEach(el=>el.onclick=()=>closeModal(el.dataset.close));
 document.querySelectorAll('.overlay').forEach(el=>el.onclick=ev=>{if(ev.target===el)closeModal(el.id)});

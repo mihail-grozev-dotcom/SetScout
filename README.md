@@ -46,17 +46,11 @@ This is **not** a scan of every game on Steam, nor does it automatically check t
 
 ## Starter data correction (Crusader Kings III)
 
-Earlier versions incorrectly assigned **Crusader Kings III** Steam App ID **1151640** (actually **Horizon Zero Dawn Complete Edition**). The correct ID is **1158310**.
+Earlier releases accidentally associated **Crusader Kings III** with Steam App ID **1151640**, which belongs to **Horizon Zero Dawn Complete Edition**. Its correct App ID is **1158310**.
 
-At startup, SetScout automatically repairs **only** the wrongly named legacy entry in local `games.json`, preserving user-entered reports, clearing the invalid Steam verification, and migrating report/deadline events. Before editing it, SetScout creates `games.json.before-appid-fix.bak`. A genuine Horizon Zero Dawn entry is not modified. The corrected CK3 entry needs a fresh scan.
+When the server starts after this update, it repairs **only** the wrongly named legacy entry in your local `games.json`, preserving source-linked user reports. It clears the previous Steam verification, set details and timestamps for that one entry, because they belonged to the wrong title. It also excludes invalid automated events, migrates related report/deadline events and preserves saved-game stars where there is no separate legitimate Horizon entry. The original database is backed up to `games.json.before-appid-fix.bak` before the correction. Restart the server and recheck the corrected game to verify it.
 
-The checker also compares the title of a recognizable Steam achievements page with the catalogue name. An unrelated title is no longer marked as Steam verified.
-
-## Pending candidate queue
-
-The **Awaiting check** counter shows only candidates that have never been scanned. Unlike earlier versions, it no longer counts already checked candidates. Select **Scan queued candidates** to verify each waiting App ID once in a throttled batch. Positive confirmations join the main game catalogue. Nonmatches and failed checks remain in **Checked candidates**, preserving their evidence for later investigation rather than incorrectly declaring the game unsupported.
-
-The scanner stops its batch on an HTTP 429 Steam rate-limit response and leaves remaining entries in Awaiting check. Retry when Steam is accepting requests again. Automatic discovery may add new pending games, so the waiting number can grow even after a successful scan. **Check all unverified** remains a separate feature for games already in the main catalogue.
+The checker now compares a recognizable Steam achievements-page title to the expected game name before marking a scan as verified. Name mismatches remain unverified.
 
 ## Your data stays local
 
@@ -104,13 +98,13 @@ Tests use mocked Steam responses where appropriate; they do **not** certify that
 
 ## Known limitations & roadmap
 
-- Discovery uses selected popular/featured Steam feeds, **not** the full Steam library. New games can be missed.
+- Keyless discovery uses selected popular/featured feeds; optional keyed store indexing is much broader, but games can still be missed due to public API coverage or failed checks.
 - Public achievement HTML is subject to change, geolocation, visibility, and rate limits.
 - Source-linked limited-time reports and deadlines are entered manually; there is no reliable public expiry-date feed.
 - Browser notifications require permission and an open page; this is not a background push service.
 - Candidate scanning is intentionally conservative to avoid unnecessary load on Steam.
 
-Possible future improvements: comprehensive discovery from permissioned datasets, validated developer-announcement sources, authenticated multi-device sync, and a clearer public/community contribution workflow.
+Possible future improvements: more complete achievement-set detail, systematic rechecking of older negative results, validated developer-announcement sources, and authenticated multi-device sync.
 
 ## Attribution
 
@@ -118,7 +112,7 @@ SetScout is an **unofficial, independent** community utility. It is not affiliat
 
 No open-source license has been chosen for this initial release. The repository owner can add one after choosing how others may reuse or contribute to the code.
 
-## Full Steam store discovery (v5)
+## Full Steam store discovery (v5/v6)
 
 SetScout now has an optional, much broader discovery index based on Steam's
 official **IStoreService/GetAppList** Web API. The older keyless
@@ -146,6 +140,41 @@ content, or change public markup. Full-store indexing requires the key; the
 existing featured/most-played discovery remains available without it.
 
 The files `.steam_api_key` and `steam_catalog.sqlite3*` are excluded from Git.
-Your old `games.json` and personal reports are unchanged by indexing. The
-current implementation performs a resumable initial full import; incremental
-refresh of the completed store list is a planned follow-up.
+Your old `games.json` and personal reports are unchanged by indexing.
+
+### Continuous store discovery (v6)
+
+In **Full Steam store discovery**, click **Continuous discovery: OFF** to opt in.
+While the local Python server remains running, SetScout will:
+
+- Resume incomplete full-store indexing automatically using the saved cursor.
+- Check pending indexed games sequentially in batches of 50, with a 1.3-second
+  delay between page requests and a 30-second gap between batches. These limits
+  are conservative defaults, not a guarantee Steam won't rate-limit you.
+- Refresh the completed store catalogue about once a day using Steam's
+  `if_modified_since` API parameter. The refresh uses a saved cursor and a
+  five-minute overlap so interrupted refreshes can resume without losing
+  changes during a run.
+- Save every completed game observation in `steam_catalog.sqlite3` and promote
+  positive Achievement Set matches into the existing `games.json` catalogue.
+
+The preference is **off by default**, stored locally and remembered across
+server restarts. Click **Continuous discovery: ON** to pause at the next safe
+check boundary. The **Stop** button pauses active work and disables continuous
+mode; a normal server shutdown preserves the preference for the next start.
+
+If Steam returns **HTTP 429**, continuous scanning pauses and the rate-limited
+game stays **pending** for a later retry. The app does not automatically retry
+rate-limited pages; wait for Steam to permit more requests before switching
+continuous mode on again. HTTP errors other than 429 are recorded as errors;
+unknown/missing evidence is never treated as confirmation that sets are absent.
+
+After the first full index completes, **Refresh Steam catalogue** triggers an
+incremental refresh manually. In continuous mode, the daily refresh happens
+without pressing the button. Refreshed games retain previous scan observations;
+metadata updates alone do not automatically recheck an older negative result.
+
+**Expect the first verification sweep to take days**, not minutes, for a
+100,000+-game catalogue. The server must stay running. Users can disable the
+feature to avoid background traffic. No background work occurs while SetScout
+is closed.
