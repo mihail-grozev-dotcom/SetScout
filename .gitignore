@@ -1,4 +1,6 @@
 # Local user data: scan history, reports, and imported games
+/.steam_api_key
+/steam_catalog.sqlite3*
 /games.json
 /games.json.*
 !games.example.json

@@ -117,3 +117,35 @@ Possible future improvements: comprehensive discovery from permissioned datasets
 SetScout is an **unofficial, independent** community utility. It is not affiliated with, endorsed by, or supported by Valve or Steam. Steam and associated game names/imagery belong to their respective owners.
 
 No open-source license has been chosen for this initial release. The repository owner can add one after choosing how others may reuse or contribute to the code.
+
+## Full Steam store discovery (v5)
+
+SetScout now has an optional, much broader discovery index based on Steam's
+official **IStoreService/GetAppList** Web API. The older keyless
+`ISteamApps/GetAppList/v2` endpoint is deprecated and should not be used.
+
+1. Get your own Steam Web API key at <https://steamcommunity.com/dev/apikey>
+   (Steam may impose eligibility requirements).
+2. Create a file named **`.steam_api_key`** beside `server.py` and paste only
+   your API key into it, without quotes. Alternatively, configure the
+   `STEAM_WEB_API_KEY` environment variable. **Never commit or share your key.**
+3. Restart SetScout and click **Index / resume store catalogue**. Steam results
+   are paginated and stored in `steam_catalog.sqlite3`, not added to your
+   smaller candidate queue or `games.json`. The initial full index can be
+   resumed if interrupted. No app in this index is assumed to support custom
+   Achievement Sets before a successful check.
+4. Click **Check next 50 indexed games** to verify the next batch. This is
+   deliberately rate-limited and stores both positive and negative observations.
+   Confirmed custom-set games are promoted to your normal SetScout catalogue.
+   Stop the server to stop scanning. If Steam returns HTTP 429, scanning pauses.
+
+This is **not instantaneous verification of the entire Steam catalogue**:
+indexing is fast, but checking individual achievement pages requires separate
+network requests and may take a long time. Steam can rate-limit requests, hide
+content, or change public markup. Full-store indexing requires the key; the
+existing featured/most-played discovery remains available without it.
+
+The files `.steam_api_key` and `steam_catalog.sqlite3*` are excluded from Git.
+Your old `games.json` and personal reports are unchanged by indexing. The
+current implementation performs a resumable initial full import; incremental
+refresh of the completed store list is a planned follow-up.

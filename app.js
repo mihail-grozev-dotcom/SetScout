@@ -8,7 +8,7 @@ const safeStore={
 const state={
   games:SEED.games.map(g=>({...g})),candidates:[],pending:safeStore.get('setscout:pending',[]),
   saved:new Set(safeStore.get('setscout:saved',[]).map(String)),filter:'all',search:'',sort:'az',
-  backend:false,auto:true,autoHours:6,scan:{},bulk:{state:'idle'},busy:false,detail:null,
+  backend:false,auto:true,autoHours:6,scan:{},bulk:{state:'idle'},store:{},busy:false,detail:null,
   reportGameId:null,reportId:null,events:[],onlyWatchEvents:false
 };
 const esc=x=>String(x??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot',"'":'&#39;'}[ch]));
@@ -103,7 +103,7 @@ function render(){
   document.querySelectorAll('#chips [data-filter]').forEach(c=>c.classList.toggle('active',c.dataset.filter===state.filter));
   $('grid').innerHTML=games.length?games.map(renderGame).join(''):`<div class="empty"><h3>Nothing found</h3><p>Try another filter or add an evidence-backed report for a game.</p><button class="btn" id="clearBtn">Clear filters</button></div>`;
   if($('clearBtn'))$('clearBtn').onclick=()=>{state.filter='all';state.search='';$('search').value='';render()};
-  renderScanner();renderActivity();
+  renderScanner();renderStoreIndex();renderActivity();
 }
 function renderScanner(){
   const on=state.backend,bulk=state.bulk||{state:'idle'};
@@ -137,6 +137,28 @@ function renderScanner(){
   const src=state.scan?.last_sources||{};
   const feeds=Object.entries(src).map(([name,x])=>`${e(name)}: ${x.ok?`${Number(x.seen||0)} candidates`:'unavailable'}`).join(' · ');
   $('scanInfo').innerHTML=`<strong>Last scan:</strong> ${e(timeLabel(state.scan?.last_run))} · <strong>Awaiting check:</strong> ${pending} · <strong>Checked, not detected:</strong> ${checked} · <strong>Check errors/mismatches:</strong> ${errors} · <strong>Automatic:</strong> 8 candidates + 8 known games every ${state.autoHours}h while Python is running.${feeds?`<div>${feeds}</div>`:''}`;
+}
+function renderStoreIndex(){
+  const x=state.store||{},sync=x.sync||{},scan=x.scan||{},active=sync.state==='running'||scan.state==='running';
+  $('storeKeyBadge').textContent=!state.backend?'SERVER OFFLINE':x.key_configured?'KEY CONFIGURED':'API KEY MISSING';
+  $('storeSyncBtn').disabled=!state.backend||!x.key_configured||active||x.index_complete;
+  $('storeSyncBtn').textContent=x.index_complete?'Store index complete':'Index / resume store catalogue';
+  $('storeScanBtn').disabled=!state.backend||active||!x.pending;
+  $('storeStopBtn').disabled=!state.backend||!active;
+  $('storeStats').textContent=`Indexed: ${Number(x.total||0).toLocaleString()} games · Not checked: ${Number(x.pending||0).toLocaleString()} · Verified sets: ${Number(x.confirmed||0)} · Checked without evidence: ${Number(x.not_detected||0)} · Errors: ${Number(x.errors||0)}${x.index_complete?' · Full index complete':' · Index in progress / incomplete'}`;
+  $('storeProgress').hidden=!active && !(sync.state==='error'||scan.state==='error'||scan.state==='rate_limited');
+  if(sync.state==='running'||sync.state==='error'){
+    $('storeProgressText').textContent=`Store indexing: ${sync.pages||0} pages, ${Number(sync.imported||0).toLocaleString()} games added this run${sync.error?' · '+sync.error:''}`;
+    $('storeMeter').value=0;$('storeMeter').max=1;
+  }else if(scan.state!=='idle'){
+    $('storeProgressText').textContent=`Verification: ${scan.checked||0}/${scan.total||0} checked · ${scan.confirmed||0} confirmed${scan.state==='rate_limited'?' · Steam rate limited':''}`;
+    $('storeMeter').value=scan.checked||0;$('storeMeter').max=Math.max(1,scan.total||1);
+  }
+}
+async function storeCommand(action){
+  const paths={sync:'/api/store-sync',scan:'/api/store-scan',stop:'/api/store-stop'};
+  try{await post(paths[action],{});await loadData()}
+  catch(err){toast('Store discovery: '+err.message)}
 }
 function renderActivity(){
   $('eventFilterBtn').textContent=state.onlyWatchEvents?'★ Watching only':'All games';
@@ -239,19 +261,19 @@ async function loadData(){
     const r=await fetch('/api/games',{cache:'no-store',signal:AbortSignal.timeout(5000)});if(!r.ok)throw Error('Server offline');
     const data=await r.json();if(!Array.isArray(data.games))throw Error('Malformed catalogue');
     state.backend=true;state.games=data.games;state.candidates=data.candidates||[];state.events=data.events||[];
-    // Transfer a saved star from the legacy wrong CK3 ID only when it is no longer a real Horizon listing.
-    if(state.saved.has('1151640') && state.games.some(g=>g.id===1158310&&g.name==='Crusader Kings III') &&
-       !state.games.some(g=>g.id===1151640)){
+    // A v1-v4 starter entry incorrectly used Horizon's App ID for Crusader Kings III.
+    // Transfer its saved star only if no real Horizon entry exists in this catalogue.
+    if(state.saved.has('1151640')&&!state.games.some(g=>Number(g.id)===1151640)&&state.games.some(g=>Number(g.id)===1158310)){
       state.saved.delete('1151640');state.saved.add('1158310');
       safeStore.set('setscout:saved',[...state.saved]);
     }
-    state.auto=data.auto_enabled!==false;state.autoHours=data.auto_hours||6;state.scan=data.scan||{};
+    state.auto=data.auto_enabled!==false;state.autoHours=data.auto_hours||6;state.scan=data.scan||{};state.store=data.store_index||{};
     const previous=state.bulk?.state;state.bulk=data.bulk||{state:'idle'};
     if(previous==='running'&&['completed','cancelled','error','rate_limited'].includes(state.bulk.state))toast(`Bulk scan ${state.bulk.state}: ${state.bulk.completed}/${state.bulk.total} checked.`);
     $('serverBanner').classList.remove('hidden');$('serverBanner').textContent='● Local Python server connected. Steam page checks are experimental; externally sourced limited-time reports remain user-reported. Automatic scans run only while the server stays open.';
     notifyNewEvents();
   }catch{
-    state.backend=false;state.bulk={state:'idle'};$('serverBanner').classList.add('hidden');
+    state.backend=false;state.bulk={state:'idle'};state.store={};$('serverBanner').classList.add('hidden');
   }
   render();
 }
@@ -303,6 +325,9 @@ $('discoverBtn').onclick=()=>runScan('discover');
 $('scanBtn').onclick=()=>runScan('recheck');
 $('queueBtn').onclick=checkPendingQueue;
 $('checkAllBtn').onclick=checkAllUnverified;
+$('storeSyncBtn').onclick=()=>storeCommand('sync');
+$('storeScanBtn').onclick=()=>storeCommand('scan');
+$('storeStopBtn').onclick=()=>storeCommand('stop');
 $('cancelAllBtn').onclick=stopBulkScan;
 $('autoBtn').onclick=toggleAuto;
 $('importBtn').onclick=()=>openModal('importOverlay');
@@ -324,5 +349,5 @@ document.addEventListener('keydown',ev=>{if(ev.key==='Escape')document.querySele
 render();
 if(location.protocol==='http:'||location.protocol==='https:'){
   loadData();setInterval(()=>{if(!state.busy)loadData()},45000);
-  setInterval(()=>{if(!state.busy&&state.backend&&state.bulk?.state==='running')loadData()},1500);
+  setInterval(()=>{if(!state.busy&&state.backend&&(state.bulk?.state==='running'||state.store?.sync?.state==='running'||state.store?.scan?.state==='running'))loadData()},1500);
 }

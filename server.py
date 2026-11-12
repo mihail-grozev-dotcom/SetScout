@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import threading
+import store_index
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from html.parser import HTMLParser
@@ -32,7 +33,7 @@ BULK_STATE_LOCK = threading.Lock()
 BULK_CANCEL = threading.Event()
 BULK_PROGRESS: dict = {'state': 'idle', 'total': 0, 'completed': 0,
                        'confirmed': 0, 'not_detected': 0, 'errors': 0}
-BULK_PAUSE_SECONDS = 0.75  # Keep a respectful gap between Steam requests.
+BULK_PAUSE_SECONDS = 0.75  # Keep a respectful gap between requests to Steam.
 USER_AGENT = 'Mozilla/5.0 (compatible; SetScout/3.0; locally run personal achievement catalogue)'
 PORT = int(os.environ.get('SETSCOUT_PORT', '8765'))
 MAX_FETCH = 6 * 1024 * 1024
@@ -63,39 +64,46 @@ def defaults(db: dict) -> dict:
     return db
 
 
-
 def repair_starter_game_ids(db: dict) -> bool:
-    """Correct only the legacy Crusader Kings III/Horizon Zero Dawn ID mismatch."""
+    """Fix an incorrect v1-v4 starter ID, preserving user reports and history.
+
+    1151640 is Horizon Zero Dawn, NOT Crusader Kings III (1158310).
+    Only touch the bad legacy pairing. Never rewrite an actual Horizon entry.
+    """
     old_id, new_id = 1151640, 1158310
-    wrong = next((g for g in db['games'] if int(g['id']) == old_id
-                  and str(g.get('name', '')).strip().casefold() == 'crusader kings iii'), None)
-    if wrong is None:
+    old = next((g for g in db['games'] if str(g.get('id')) == str(old_id)
+                and str(g.get('name', '')).strip().casefold() == 'crusader kings iii'), None)
+    if old is None:
         return False
-    existing = next((g for g in db['games'] if int(g['id']) == new_id), None)
-    if existing is not None:
-        reports = existing.setdefault('limited_items', [])
-        seen = {r.get('id') for r in reports}
-        reports.extend(r for r in wrong.get('limited_items', []) if r.get('id') not in seen)
-        db['games'].remove(wrong)
+
+    correct = next((g for g in db['games'] if str(g.get('id')) == str(new_id)), None)
+    if correct and correct is not old:
+        # Preserve user reports if the corrected game already exists.
+        reports = correct.setdefault('limited_items', [])
+        known = {r.get('id') for r in reports}
+        reports.extend(r for r in old.get('limited_items', []) if r.get('id') not in known)
+        db['games'].remove(old)
     else:
-        wrong['id'] = new_id
-        for field in ('verified', 'verified_at', 'checked_at', 'set_count', 'dlc_set_count',
-                      'set_names', 'achievement_entries', 'archived_count',
-                      'steam_archived_items', 'archive_visibility', 'url',
-                      'last_check_status', 'last_check_note'):
-            wrong.pop(field, None)
-        wrong['types'] = []
-        wrong['last_check_note'] = 'Starter App ID corrected; Steam recheck required.'
-    db['candidates'] = [c for c in db['candidates'] if int(c['id']) != new_id]
-    kept = []
+        old['id'] = new_id
+        # All these were obtained for Horizon and are invalid for Crusader Kings III.
+        for field in ('verified', 'verified_at', 'checked_at', 'set_count',
+                      'dlc_set_count', 'set_names', 'achievement_entries',
+                      'archived_count', 'steam_archived_items', 'archive_visibility',
+                      'url', 'last_check_status', 'last_check_note'):
+            old.pop(field, None)
+        old['types'] = []
+        old['last_check_note'] = 'Starter App ID corrected; Steam recheck required.'
+    db['candidates'] = [c for c in db['candidates'] if str(c.get('id')) != str(new_id)]
+    retained = []
     for event in db['events']:
-        if int(event.get('appid', 0)) != old_id:
-            kept.append(event)
+        if str(event.get('appid')) != str(old_id):
+            retained.append(event)
         elif event.get('kind') in {'report', 'deadline'}:
             event['appid'] = new_id
             event['game'] = 'Crusader Kings III'
-            kept.append(event)
-    db['events'] = kept
+            retained.append(event)
+        # Discard wrongly attributed automated achievement-set/archive events.
+    db['events'] = retained
     return True
 
 
@@ -111,6 +119,7 @@ def read_db() -> dict:
                 pass
         db = defaults(json.loads(DB_FILE.read_text(encoding='utf-8')))
         if repair_starter_game_ids(db):
+            # Preserve the original on-disk database before the one-time correction.
             backup = DB_FILE.with_name(DB_FILE.name + '.before-appid-fix.bak')
             if not backup.exists():
                 shutil.copy2(DB_FILE, backup)
@@ -391,9 +400,12 @@ def page_title(page: str) -> str | None:
     return None
 
 
-
 def steam_name_matches(expected: str, actual: str) -> bool:
-    """Require a matching Steam title; tolerate punctuation but not sequel numbers."""
+    """Reject pages for an unrelated Steam title before marking verified.
+
+    Normalizes common trademark punctuation and capitalization. Preserve numbers
+    to distinguish sequels, e.g. PowerWash Simulator vs PowerWash Simulator 2.
+    """
     def clean(value):
         value = html.unescape(value).casefold().replace('®', '').replace('™', '')
         return re.sub(r'[^a-z0-9]+', ' ', value).strip()
@@ -642,8 +654,9 @@ def background_scanner(stop_event: threading.Event):
             run_scan(8, True)
             run_scan(8, False)
 
+
 def bulk_snapshot() -> dict:
-    """Report in-memory progress and the count of unverified listings."""
+    """Report in-memory progress plus the current number of unverified listings."""
     with BULK_STATE_LOCK:
         snapshot = dict(BULK_PROGRESS)
         snapshot['cancel_requested'] = BULK_CANCEL.is_set() if snapshot['state'] == 'running' else False
@@ -654,7 +667,7 @@ def bulk_snapshot() -> dict:
 
 
 def _run_bulk_worker(items: list[dict]) -> None:
-    """Process a fixed, deduplicated snapshot without reselecting failed games."""
+    """Run a fixed, deduplicated snapshot once, without reselecting failed games."""
     try:
         for index, game in enumerate(items):
             if BULK_CANCEL.is_set():
@@ -668,7 +681,7 @@ def _run_bulk_worker(items: list[dict]) -> None:
                 try:
                     save_result(checked, game)
                 except Exception:
-                    pass
+                    pass  # A failed database write must not silently mark this verified.
             status = checked.get('status', 'error')
             with BULK_STATE_LOCK:
                 BULK_PROGRESS['completed'] += 1
@@ -770,7 +783,9 @@ class Handler(SimpleHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == '/api/games':
             db = read_db()
-            return self.json_response({**{k: db.get(k) for k in ('games', 'candidates', 'events', 'updated_at', 'auto_enabled', 'auto_hours', 'scan')}, 'bulk': bulk_snapshot(), 'candidate_counts': candidate_counts(db['candidates'])})
+            return self.json_response({**{k: db.get(k) for k in ('games', 'candidates', 'events', 'updated_at', 'auto_enabled', 'auto_hours', 'scan')}, 'bulk': bulk_snapshot(), 'candidate_counts': candidate_counts(db['candidates']), 'store_index': store_index.stats()})
+        if path == '/api/store-index':
+            return self.json_response(store_index.stats())
         if path == '/api/bulk-status':
             return self.json_response(bulk_snapshot())
         if path == '/api/status':
@@ -782,7 +797,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {'/api/check', '/api/scan', '/api/discover', '/api/settings', '/api/import', '/api/report', '/api/delete-report', '/api/scan-unverified', '/api/scan-pending', '/api/cancel-unverified'}:
+        if path not in {'/api/check', '/api/scan', '/api/discover', '/api/settings', '/api/import', '/api/report', '/api/delete-report', '/api/scan-unverified', '/api/scan-pending', '/api/cancel-unverified', '/api/store-sync', '/api/store-scan', '/api/store-stop'}:
             return self.json_response({'error': 'Unknown action'}, 404)
         try:
             if self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json':
@@ -796,6 +811,16 @@ class Handler(SimpleHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b'{}')
             if not isinstance(payload, dict):
                 raise ValueError('Expected JSON object')
+            if path == '/api/store-sync':
+                return self.json_response(store_index.start_sync())
+            if path == '/api/store-scan':
+                if SCAN_LOCK.locked():
+                    return self.json_response({'error': 'An existing SetScout scan is already running.'}, 409)
+                known = {int(g['id']) for g in read_db()['games']}
+                return self.json_response(store_index.start_scan(known, check_game, save_result))
+            if path == '/api/store-stop':
+                store_index.stop()
+                return self.json_response({'stopping': True})
             if path == '/api/scan-unverified':
                 result = start_unverified_scan()
                 return self.json_response(result, 409 if 'error' in result else 200)
@@ -857,6 +882,7 @@ def main():
     finally:
         stop.set()
         BULK_CANCEL.set()
+        store_index.stop()
         server.server_close()
 
 if __name__ == '__main__':
