@@ -1,5 +1,5 @@
 'use strict';
-/* SetScout v3 — zero-dependency local interface; no credentials or telemetry. */
+/* SetScout v4 — zero-dependency local interface; no credentials or telemetry. */
 const $=id=>document.getElementById(id);
 const safeStore={
   get(k,def){try{return JSON.parse(localStorage.getItem(k))??def}catch{return def}},
@@ -8,7 +8,7 @@ const safeStore={
 const state={
   games:SEED.games.map(g=>({...g})),candidates:[],pending:safeStore.get('setscout:pending',[]),
   saved:new Set(safeStore.get('setscout:saved',[]).map(String)),filter:'all',search:'',sort:'az',
-  backend:false,auto:true,autoHours:6,scan:{},busy:false,detail:null,
+  backend:false,auto:true,autoHours:6,scan:{},bulk:{state:'idle'},busy:false,detail:null,
   reportGameId:null,reportId:null,events:[],onlyWatchEvents:false
 };
 const esc=x=>String(x??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot',"'":'&#39;'}[ch]));
@@ -101,11 +101,27 @@ function render(){
   renderScanner();renderActivity();
 }
 function renderScanner(){
-  const on=state.backend;
+  const on=state.backend,bulk=state.bulk||{state:'idle'};
+  const running=bulk.state==='running',unverified=state.games.filter(g=>!g.verified).length;
   $('autoBadge').textContent=on?(state.auto?'AUTO: ON':'AUTO: OFF'):'SERVER OFFLINE';
   $('autoBadge').classList.toggle('off',!on||!state.auto);
-  for(const id of ['discoverBtn','scanBtn','autoBtn','importBtn'])$(id).disabled=!on||state.busy;
+  for(const id of ['discoverBtn','scanBtn','autoBtn','importBtn'])$(id).disabled=!on||state.busy||running;
+  $('checkAllBtn').disabled=!on||state.busy||running||unverified===0;
+  $('checkAllBtn').textContent=`✓ Check all unverified (${unverified})`;
+  $('cancelAllBtn').hidden=!on||!running;
+  $('cancelAllBtn').disabled=!on||bulk.cancel_requested;
+  $('cancelAllBtn').textContent=bulk.cancel_requested?'Stopping after current check…':'Stop bulk scan';
   $('autoBtn').textContent=state.auto?'● Automatic checks: ON':'○ Automatic checks: OFF';
+  const showBulk=on&&bulk.state!=='idle';
+  $('bulkProgress').hidden=!showBulk;
+  if(showBulk){
+    const total=Number(bulk.total||0),completed=Number(bulk.completed||0);
+    $('bulkMeter').max=Math.max(total,1);
+    $('bulkMeter').value=completed;
+    const statusText={running:'Checking',completed:'Finished',cancelled:'Stopped',error:'Stopped due to error'}[bulk.state]||'Ready';
+    $('bulkStatus').textContent=`${statusText} ${completed} of ${total} games · ${Number(bulk.confirmed||0)} verified · ${Number(bulk.not_detected||0)} not detected · ${Number(bulk.errors||0)} errors${bulk.cancel_requested?' · stopping…':''}`;
+    $('bulkLastGame').textContent=bulk.error|| (bulk.last_game?`Last: ${bulk.last_game} (${bulk.last_status||'checked'})`:'Each unverified game will be checked once in this run.');
+  }
   if(!on)return;
   const src=state.scan?.last_sources||{};
   const feeds=Object.entries(src).map(([name,x])=>`${e(name)}: ${x.ok?`${Number(x.seen||0)} candidates`:'unavailable'}`).join(' · ');
@@ -213,10 +229,12 @@ async function loadData(){
     const data=await r.json();if(!Array.isArray(data.games))throw Error('Malformed catalogue');
     state.backend=true;state.games=data.games;state.candidates=data.candidates||[];state.events=data.events||[];
     state.auto=data.auto_enabled!==false;state.autoHours=data.auto_hours||6;state.scan=data.scan||{};
+    const previous=state.bulk?.state;state.bulk=data.bulk||{state:'idle'};
+    if(previous==='running'&&['completed','cancelled','error'].includes(state.bulk.state))toast(`Bulk scan ${state.bulk.state}: ${state.bulk.completed}/${state.bulk.total} checked.`);
     $('serverBanner').classList.remove('hidden');$('serverBanner').textContent='● Local Python server connected. Steam page checks are experimental; externally sourced limited-time reports remain user-reported. Automatic scans run only while the server stays open.';
     notifyNewEvents();
   }catch{
-    state.backend=false;$('serverBanner').classList.add('hidden');
+    state.backend=false;state.bulk={state:'idle'};$('serverBanner').classList.add('hidden');
   }
   render();
 }
@@ -230,6 +248,20 @@ async function runScan(mode){
     toast('Steam check completed. Review time-sensitive updates in Activity.');
   }catch(err){$('scanResults').textContent=`Scan failed: ${err.message}`}finally{state.busy=false;renderScanner()}
 }
+async function checkAllUnverified(){
+  if(!state.backend||state.busy||state.bulk?.state==='running')return;
+  state.busy=true;renderScanner();
+  try{
+    state.bulk=await post('/api/scan-unverified',{});
+    await loadData();
+    $('scanResults').textContent=`Bulk scan started: ${Number(state.bulk.total||0)} unverified listed games. You can leave this page open to watch progress.`;
+  }catch(err){$('scanResults').textContent=`Bulk scan failed: ${err.message}`}
+  finally{state.busy=false;renderScanner()}
+}
+async function stopBulkScan(){
+  try{state.bulk=await post('/api/cancel-unverified',{});renderScanner()}
+  catch(err){toast(`Cannot stop scan: ${err.message}`)}
+}
 async function toggleAuto(){try{const r=await post('/api/settings',{auto_enabled:!state.auto});state.auto=r.auto_enabled;renderScanner();toast(state.auto?'Automatic scanning enabled.':'Automatic scanning disabled.')}catch(err){toast(err.message)}}
 async function importIDs(){const b=$('bulkSubmit'),f=$('importFeedback');b.disabled=true;try{const data=await post('/api/import',{text:$('bulkInput').value});f.textContent=`${data.queued} added to queue (${data.received} unique IDs).`;f.classList.add('show');await loadData()}catch(err){f.textContent=err.message;f.classList.add('show')}finally{b.disabled=false}}
 $('grid').addEventListener('click',ev=>{const save=ev.target.closest('[data-save]');if(save){toggleSaved(save.dataset.save);return}const d=ev.target.closest('[data-detail]');if(d)showDetail(d.dataset.detail)});
@@ -242,6 +274,8 @@ $('addBtn').onclick=()=>{openModal('addOverlay');$('steamInput').focus()};
 $('checkBtn').onclick=check;
 $('discoverBtn').onclick=()=>runScan('discover');
 $('scanBtn').onclick=()=>runScan('recheck');
+$('checkAllBtn').onclick=checkAllUnverified;
+$('cancelAllBtn').onclick=stopBulkScan;
 $('autoBtn').onclick=toggleAuto;
 $('importBtn').onclick=()=>openModal('importOverlay');
 $('bulkSubmit').onclick=importIDs;
@@ -262,4 +296,5 @@ document.addEventListener('keydown',ev=>{if(ev.key==='Escape')document.querySele
 render();
 if(location.protocol==='http:'||location.protocol==='https:'){
   loadData();setInterval(()=>{if(!state.busy)loadData()},45000);
+  setInterval(()=>{if(!state.busy&&state.backend&&state.bulk?.state==='running')loadData()},1500);
 }

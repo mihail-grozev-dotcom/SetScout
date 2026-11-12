@@ -18,6 +18,7 @@ SetScout helps you browse games reported to use Steam's newer Achievement Sets, 
 - Record **limited-time**, **archived**, or **unknown** achievement/set reports, including source links and optional deadlines.
 - Watch saved games, see an activity feed and upcoming deadlines, and optionally receive browser desktop notifications while the page is open.
 - Periodically scan a limited number of candidate and existing games while the local server runs; or scan manually.
+- **Check all unverified games** in a single resumable-in-browser, server-side run with live progress, per-result counts, and a stop button. Each existing unverified catalogue entry is checked at most once per run; candidates are scanned separately.
 
 ## Quick start (Windows)
 
@@ -36,6 +37,12 @@ python3 server.py
 ```
 
 Then visit http://127.0.0.1:8765.
+
+## Check all unverified games
+
+In the **Automatic game discovery** panel, select **Check all unverified** to check every listed game that is not yet Steam-verified. The scan continues in the local Python server if you close the browser tab, but ends if you close the server. Progress and results are visible in the scanner panel; you can stop after the current Steam request. The scan rate is deliberately limited to avoid overloading Steam.
+
+This is **not** a scan of every game on Steam, nor does it automatically check the separate candidate queue. If Steam cannot confirm a game (for example, due to a rate limit), the entry stays unverified and its last-check status is recorded. Run the button again if you want to retry those entries.
 
 ## Your data stays local
 

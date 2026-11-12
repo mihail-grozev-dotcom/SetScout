@@ -1,4 +1,4 @@
-"""SetScout v3: local Achievement Sets discovery, temporal status, and activity feed.
+"""SetScout v4: local Achievement Sets discovery, temporal status, and activity feed.
 
 Python 3.10+; no dependencies or Steam API key. Runs only on 127.0.0.1.
 Steam's public HTML and public discovery feeds can change at any time.
@@ -26,6 +26,11 @@ DB_FILE = HERE / 'games.json'
 SEED_FILE = HERE / 'games.example.json'
 DB_LOCK = threading.RLock()
 SCAN_LOCK = threading.Lock()
+BULK_STATE_LOCK = threading.Lock()
+BULK_CANCEL = threading.Event()
+BULK_PROGRESS: dict = {'state': 'idle', 'total': 0, 'completed': 0,
+                       'confirmed': 0, 'not_detected': 0, 'errors': 0}
+BULK_PAUSE_SECONDS = 0.75  # Keep a respectful gap between Steam requests.
 USER_AGENT = 'Mozilla/5.0 (compatible; SetScout/3.0; locally run personal achievement catalogue)'
 PORT = int(os.environ.get('SETSCOUT_PORT', '8765'))
 MAX_FETCH = 6 * 1024 * 1024
@@ -562,6 +567,93 @@ def background_scanner(stop_event: threading.Event):
             run_scan(8, True)
             run_scan(8, False)
 
+def bulk_snapshot() -> dict:
+    """Report in-memory progress and the count of unverified listings."""
+    with BULK_STATE_LOCK:
+        snapshot = dict(BULK_PROGRESS)
+        snapshot['cancel_requested'] = BULK_CANCEL.is_set() if snapshot['state'] == 'running' else False
+    snapshot['remaining_unverified'] = sum(not g.get('verified') for g in read_db()['games'])
+    return snapshot
+
+
+def _run_unverified_worker(items: list[dict]) -> None:
+    """Process a fixed, deduplicated snapshot without reselecting failed games."""
+    try:
+        for index, game in enumerate(items):
+            if BULK_CANCEL.is_set():
+                break
+            try:
+                checked = check_game(int(game['id']), game)
+                save_result(checked, game)
+            except Exception as exc:
+                checked = {'id': game['id'], 'status': 'error', 'checked_at': now(),
+                           'reason': f'Unexpected: {type(exc).__name__}: {str(exc)[:110]}'}
+                try:
+                    save_result(checked, game)
+                except Exception:
+                    pass
+            status = checked.get('status', 'error')
+            with BULK_STATE_LOCK:
+                BULK_PROGRESS['completed'] += 1
+                BULK_PROGRESS['confirmed'] += status == 'confirmed'
+                BULK_PROGRESS['not_detected'] += status == 'not_detected'
+                BULK_PROGRESS['errors'] += status not in {'confirmed', 'not_detected'}
+                BULK_PROGRESS['last_game'] = game.get('name', f"Steam App {game['id']}")
+                BULK_PROGRESS['last_status'] = status
+            if index < len(items) - 1 and BULK_CANCEL.wait(BULK_PAUSE_SECONDS):
+                break
+    except Exception as exc:
+        with BULK_STATE_LOCK:
+            BULK_PROGRESS['state'] = 'error'
+            BULK_PROGRESS['error'] = f'{type(exc).__name__}: {str(exc)[:150]}'
+    finally:
+        with BULK_STATE_LOCK:
+            if BULK_PROGRESS['state'] == 'running':
+                BULK_PROGRESS['state'] = 'cancelled' if BULK_CANCEL.is_set() else 'completed'
+            BULK_PROGRESS['finished_at'] = now()
+        SCAN_LOCK.release()
+
+
+def start_unverified_scan() -> dict:
+    """Start a nonblocking scan of each currently unverified listed App ID once."""
+    global BULK_PROGRESS
+    if not SCAN_LOCK.acquire(blocking=False):
+        return {'error': 'Another scan is already running.'}
+    try:
+        seen = set()
+        items = []
+        for g in read_db()['games']:
+            appid = int(g['id'])
+            if not g.get('verified') and appid not in seen:
+                items.append(g.copy())
+                seen.add(appid)
+        items.sort(key=lambda g: (bool(g.get('checked_at')), parse_date(g.get('checked_at')), int(g['id'])))
+        BULK_CANCEL.clear()
+        with BULK_STATE_LOCK:
+            BULK_PROGRESS = {'state': 'running' if items else 'completed',
+                             'total': len(items), 'completed': 0, 'confirmed': 0,
+                             'not_detected': 0, 'errors': 0, 'started_at': now(),
+                             'finished_at': None, 'last_game': None, 'last_status': None}
+            response = {**BULK_PROGRESS, 'remaining_unverified': len(items), 'cancel_requested': False}
+        if items:
+            threading.Thread(target=_run_unverified_worker, args=(items,), daemon=True,
+                             name='setscout-unverified-scan').start()
+        else:
+            SCAN_LOCK.release()
+        return response
+    except Exception:
+        SCAN_LOCK.release()
+        raise
+
+
+def cancel_unverified_scan() -> dict:
+    """Signal graceful stop after the current Steam request finishes."""
+    with BULK_STATE_LOCK:
+        if BULK_PROGRESS['state'] != 'running':
+            return {'error': 'No unverified scan is currently running.'}
+        BULK_CANCEL.set()
+    return bulk_snapshot()
+
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -581,7 +673,9 @@ class Handler(SimpleHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == '/api/games':
             db = read_db()
-            return self.json_response({k: db.get(k) for k in ('games', 'candidates', 'events', 'updated_at', 'auto_enabled', 'auto_hours', 'scan')})
+            return self.json_response({**{k: db.get(k) for k in ('games', 'candidates', 'events', 'updated_at', 'auto_enabled', 'auto_hours', 'scan')}, 'bulk': bulk_snapshot()})
+        if path == '/api/bulk-status':
+            return self.json_response(bulk_snapshot())
         if path == '/api/status':
             db = read_db()
             return self.json_response({'running_scan': SCAN_LOCK.locked(),
@@ -591,7 +685,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {'/api/check', '/api/scan', '/api/discover', '/api/settings', '/api/import', '/api/report', '/api/delete-report'}:
+        if path not in {'/api/check', '/api/scan', '/api/discover', '/api/settings', '/api/import', '/api/report', '/api/delete-report', '/api/scan-unverified', '/api/cancel-unverified'}:
             return self.json_response({'error': 'Unknown action'}, 404)
         try:
             if self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json':
@@ -605,6 +699,12 @@ class Handler(SimpleHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b'{}')
             if not isinstance(payload, dict):
                 raise ValueError('Expected JSON object')
+            if path == '/api/scan-unverified':
+                result = start_unverified_scan()
+                return self.json_response(result, 409 if 'error' in result else 200)
+            if path == '/api/cancel-unverified':
+                result = cancel_unverified_scan()
+                return self.json_response(result, 409 if 'error' in result else 200)
             if path == '/api/report':
                 return self.json_response({'report': manual_report(payload)})
             if path == '/api/delete-report':
@@ -646,7 +746,7 @@ def main():
     stop = threading.Event()
     scheduler = threading.Thread(target=background_scanner, args=(stop,), daemon=True)
     scheduler.start()
-    print(f'\nSetScout v3 — http://127.0.0.1:{PORT}')
+    print(f'\nSetScout v4 — http://127.0.0.1:{PORT}')
     print('Open the URL above. Automatic scans are enabled by default while the server is running.')
     print('Discovery: public feeds, 8 candidate + 8 known checks / 6 hours; local activity feed.')
     print('Steam may throttle checks. Ctrl+C stops the app and background scans.\n')
@@ -656,6 +756,7 @@ def main():
         pass
     finally:
         stop.set()
+        BULK_CANCEL.set()
         server.server_close()
 
 if __name__ == '__main__':
