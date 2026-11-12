@@ -6,6 +6,7 @@ The private Steam API key is read locally and never returned to browser clients.
 from __future__ import annotations
 
 import datetime as dt
+from contextlib import contextmanager
 import json
 import os
 import sqlite3
@@ -40,16 +41,25 @@ def api_key() -> str:
     return key
 
 
+@contextmanager
 def open_db():
-    con = sqlite3.connect(DB_PATH, timeout=20)
-    con.execute('PRAGMA busy_timeout=20000')
-    con.execute('PRAGMA journal_mode=WAL')
-    con.execute('CREATE TABLE IF NOT EXISTS apps (appid INTEGER PRIMARY KEY, name TEXT NOT NULL, '
-                'modified INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT \'pending\', '
-                'checked_at TEXT, note TEXT)')
-    con.execute('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
-    return con
+    """Commit or roll back transactions, then always close the SQLite handle.
 
+    ``with sqlite3.connect(...)`` does NOT close the connection at block exit.
+    On Windows, leaving it open keeps the database locked during test cleanup.
+    """
+    con = sqlite3.connect(DB_PATH, timeout=20)
+    try:
+        con.execute('PRAGMA busy_timeout=20000')
+        con.execute('PRAGMA journal_mode=WAL')
+        con.execute('CREATE TABLE IF NOT EXISTS apps (appid INTEGER PRIMARY KEY, name TEXT NOT NULL, '
+                    "modified INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending', "
+                    'checked_at TEXT, note TEXT)')
+        con.execute('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+        with con:
+            yield con
+    finally:
+        con.close()
 
 def meta(con, key, default=''):
     row = con.execute('SELECT value FROM meta WHERE key=?', (key,)).fetchone()

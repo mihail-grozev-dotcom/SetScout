@@ -1,5 +1,6 @@
 """Keyless mocked tests for paginated store discovery."""
 import json
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -24,6 +25,22 @@ class StoreIndexTests(unittest.TestCase):
                 time.sleep(.01)
         self.p.stop()
         self.dir.cleanup()
+
+    def test_connection_closes_when_context_exits(self):
+        with idx.open_db() as con:
+            self.assertEqual(con.execute('SELECT 1').fetchone(), (1,))
+        with self.assertRaises(sqlite3.ProgrammingError):
+            con.execute('SELECT 1')
+
+    def test_connection_closes_and_rolls_back_on_error(self):
+        with self.assertRaisesRegex(RuntimeError, 'deliberate test error'):
+            with idx.open_db() as con:
+                con.execute('INSERT INTO apps(appid,name) VALUES(?,?)', (777, 'Rollback test'))
+                raise RuntimeError('deliberate test error')
+        with self.assertRaises(sqlite3.ProgrammingError):
+            con.execute('SELECT 1')
+        with idx.open_db() as fresh:
+            self.assertIsNone(fresh.execute('SELECT appid FROM apps WHERE appid=777').fetchone())
 
     def test_page_parses_advancing_cursor(self):
         data={'response':{'apps':[{'appid':21,'name':'Game 21','last_modified':123},
