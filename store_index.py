@@ -17,6 +17,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from steam_credentials import get_api_key
+
 HERE = Path(__file__).resolve().parent
 DB_PATH = HERE / 'steam_catalog.sqlite3'
 KEY_PATH = HERE / '.steam_api_key'
@@ -39,10 +41,8 @@ STOP_SCAN = threading.Event()
 
 
 def api_key() -> str:
-    key = os.environ.get('STEAM_WEB_API_KEY', '').strip()
-    if not key and KEY_PATH.exists():
-        key = KEY_PATH.read_text(encoding='utf-8').strip()
-    return key
+    # Windows Credential Manager has priority. A legacy plaintext file is not read.
+    return get_api_key()
 
 
 @contextmanager
@@ -211,7 +211,7 @@ def start_sync():
     """Resume initial indexing, or refresh changed/new games after completion."""
     global SYNC
     if not api_key():
-        raise ValueError('Steam API key missing. Add it to .steam_api_key in the SetScout directory.')
+        raise ValueError('Steam API key missing. Run: python steam_credentials.py import-file (or set)')
     if not SYNC_LOCK.acquire(blocking=False):
         raise ValueError('Catalogue indexing is already running.')
     try:

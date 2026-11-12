@@ -52,14 +52,6 @@ When the server starts after this update, it repairs **only** the wrongly named 
 
 The checker now compares a recognizable Steam achievements-page title to the expected game name before marking a scan as verified. Name mismatches remain unverified.
 
-## Local server security
-
-SetScout is intended for one trusted user on a single computer. The server listens only on `127.0.0.1`. It serves only the browser UI assets (`/`, `/index.html`, `/app.js`, and `/docs/preview.jpg`) plus its explicit JSON API endpoints. Private files such as `.steam_api_key`, `games.json`, `steam_catalog.sqlite3`, `.git/`, and Python source files are **not downloadable** through the HTTP server.
-
-The server checks local `Host` headers to mitigate DNS rebinding and requires a matching browser `Origin` for JSON write requests. Responses use no-store caching, `nosniff`, and frame/referrer restrictions. The API does **not** authenticate a process already running on your computer, so malicious local software could still reach the server. Avoid running untrusted programs and never expose this development server to the public internet or forward port 8765.
-
-The Steam Web API key is plaintext at rest in `.steam_api_key`; use your Windows user account's normal file permissions, keep that file out of shared folders and backups accessible to others, and never commit or share it. Steam requests use HTTPS and pass the key in a request header, not a URL. If a previous unpatched SetScout was accessed by an untrusted program, consider rotating your key on Steam's developer website. Restart SetScout after upgrading to apply the restrictions.
-
 ## Your data stays local
 
 On first startup, the server creates **`games.json`** from the included **`games.example.json`**. This local file stores your discovered games, verification history, reports, and activity records. Browser `localStorage` holds your starred watchlist and notification state.
@@ -89,6 +81,8 @@ SetScout/
 ├── app.js                   # Front-end logic
 ├── index.html               # UI and styles
 ├── server.py                # Local HTTP server and Steam checker
+├── steam_credentials.py     # Local Windows Credential Manager helper
+├── store_index.py           # Paged Steam store index and verifier
 ├── games.example.json       # Public starter catalogue
 ├── Start_SetScout.bat       # Windows launcher
 ├── docs/preview.jpg         # Screenshot
@@ -128,9 +122,22 @@ official **IStoreService/GetAppList** Web API. The older keyless
 
 1. Get your own Steam Web API key at <https://steamcommunity.com/dev/apikey>
    (Steam may impose eligibility requirements).
-2. Create a file named **`.steam_api_key`** beside `server.py` and paste only
-   your API key into it, without quotes. Alternatively, configure the
-   `STEAM_WEB_API_KEY` environment variable. **Never commit or share your key.**
+2. **Windows 11:** Keep your Steam API key in **Windows Credential Manager**, not
+   in the project folder. If you already have a legacy `.steam_api_key` file,
+   stop SetScout, update the code, and run:
+
+   ```cmd
+   python steam_credentials.py import-file
+   python steam_credentials.py status
+   ```
+
+   The first command saves the key under your Windows user account, verifies it,
+   and **only then deletes** the plaintext file. `status` must say
+   `Credential Manager: configured` and `Legacy plaintext file: not present`.
+   If you do not have a legacy file, run `python steam_credentials.py set`
+   instead; the key is entered with its characters hidden. On Mac/Linux, use
+   a private `STEAM_WEB_API_KEY` environment variable or an operating-system
+   secret manager that injects one. **Never commit or share your key.**
 3. Restart SetScout and click **Index / resume store catalogue**. Steam results
    are paginated and stored in `steam_catalog.sqlite3`, not added to your
    smaller candidate queue or `games.json`. The initial full index can be
@@ -147,7 +154,19 @@ network requests and may take a long time. Steam can rate-limit requests, hide
 content, or change public markup. Full-store indexing requires the key; the
 existing featured/most-played discovery remains available without it.
 
-The files `.steam_api_key` and `steam_catalog.sqlite3*` are excluded from Git.
+The legacy file `.steam_api_key` and local database files `steam_catalog.sqlite3*`
+are excluded from Git. **SetScout no longer reads a plaintext key file at runtime.**
+GitHub Actions secrets are for code running on GitHub's runners, not for this
+local Windows app; storing the key as a GitHub secret would not make it available
+securely to the app on your PC. The active Credential Manager secret stays on
+**your Windows machine**, independent of whether the repository is public.
+
+Windows Credential Manager protects against accidental inclusion in the repository
+and casual file access, but malware running as your Windows user may still retrieve
+it. Keep Windows updated and protect your user account. The old plaintext file may
+remain recoverable from disk snapshots or backups; if it may have been exposed,
+revoke/rotate the old Steam key on Steam's developer page after migration.
+
 Your old `games.json` and personal reports are unchanged by indexing.
 
 ### Continuous store discovery (v6)
