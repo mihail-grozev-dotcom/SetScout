@@ -7,10 +7,12 @@ The program never treats an HTTP error or an ordinary achievements list as sets.
 from __future__ import annotations
 
 import datetime as dt
+import difflib
 import html
 import json
 import os
 import re
+import shutil
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -61,6 +63,42 @@ def defaults(db: dict) -> dict:
     return db
 
 
+
+def repair_starter_game_ids(db: dict) -> bool:
+    """Correct only the legacy Crusader Kings III/Horizon Zero Dawn ID mismatch."""
+    old_id, new_id = 1151640, 1158310
+    wrong = next((g for g in db['games'] if int(g['id']) == old_id
+                  and str(g.get('name', '')).strip().casefold() == 'crusader kings iii'), None)
+    if wrong is None:
+        return False
+    existing = next((g for g in db['games'] if int(g['id']) == new_id), None)
+    if existing is not None:
+        reports = existing.setdefault('limited_items', [])
+        seen = {r.get('id') for r in reports}
+        reports.extend(r for r in wrong.get('limited_items', []) if r.get('id') not in seen)
+        db['games'].remove(wrong)
+    else:
+        wrong['id'] = new_id
+        for field in ('verified', 'verified_at', 'checked_at', 'set_count', 'dlc_set_count',
+                      'set_names', 'achievement_entries', 'archived_count',
+                      'steam_archived_items', 'archive_visibility', 'url',
+                      'last_check_status', 'last_check_note'):
+            wrong.pop(field, None)
+        wrong['types'] = []
+        wrong['last_check_note'] = 'Starter App ID corrected; Steam recheck required.'
+    db['candidates'] = [c for c in db['candidates'] if int(c['id']) != new_id]
+    kept = []
+    for event in db['events']:
+        if int(event.get('appid', 0)) != old_id:
+            kept.append(event)
+        elif event.get('kind') in {'report', 'deadline'}:
+            event['appid'] = new_id
+            event['game'] = 'Crusader Kings III'
+            kept.append(event)
+    db['events'] = kept
+    return True
+
+
 def read_db() -> dict:
     with DB_LOCK:
         if not DB_FILE.exists():
@@ -71,7 +109,13 @@ def read_db() -> dict:
                     new_db.write(SEED_FILE.read_text(encoding='utf-8'))
             except FileExistsError:
                 pass
-        return defaults(json.loads(DB_FILE.read_text(encoding='utf-8')))
+        db = defaults(json.loads(DB_FILE.read_text(encoding='utf-8')))
+        if repair_starter_game_ids(db):
+            backup = DB_FILE.with_name(DB_FILE.name + '.before-appid-fix.bak')
+            if not backup.exists():
+                shutil.copy2(DB_FILE, backup)
+            write_db(db)
+        return db
 
 
 def write_db(db: dict) -> None:
@@ -347,6 +391,20 @@ def page_title(page: str) -> str | None:
     return None
 
 
+
+def steam_name_matches(expected: str, actual: str) -> bool:
+    """Require a matching Steam title; tolerate punctuation but not sequel numbers."""
+    def clean(value):
+        value = html.unescape(value).casefold().replace('®', '').replace('™', '')
+        return re.sub(r'[^a-z0-9]+', ' ', value).strip()
+    a, b = clean(expected), clean(actual)
+    if not a or not b:
+        return True
+    if re.findall(r'\d+', a) != re.findall(r'\d+', b):
+        return False
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.68 or a in b or b in a
+
+
 def check_game(appid: int, existing: dict | None = None) -> dict:
     url = f'https://steamcommunity.com/achievements/{appid}?l=english'
     date = now()
@@ -358,7 +416,12 @@ def check_game(appid: int, existing: dict | None = None) -> dict:
                     'reason': 'No recognizable custom achievement sets on the public page; this is not proof they are absent.',
                     'url': url}
         old_name = (existing or {}).get('name', '')
-        name = old_name if old_name and not old_name.startswith('Steam App ') else (page_title(page) or old_name or f'Steam App {appid}')
+        observed_name = page_title(page)
+        if old_name and not old_name.startswith('Steam App ') and observed_name and not steam_name_matches(old_name, observed_name):
+            return {'id': appid, 'status': 'name_mismatch', 'checked_at': date,
+                    'reason': f'Steam page is for {observed_name!r}, not {old_name!r}; no verification recorded.',
+                    'url': url}
+        name = old_name if old_name and not old_name.startswith('Steam App ') else (observed_name or old_name or f'Steam App {appid}')
         result = {'id': appid, 'name': name,
                   'status': 'confirmed', 'verified': True, 'checked_at': date, 'verified_at': date,
                   'url': url, **stats}

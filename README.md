@@ -44,6 +44,14 @@ In the **Automatic game discovery** panel, select **Check all unverified** to ch
 
 This is **not** a scan of every game on Steam, nor does it automatically check the separate candidate queue. If Steam cannot confirm a game (for example, due to a rate limit), the entry stays unverified and its last-check status is recorded. Run the button again if you want to retry those entries.
 
+## Starter data correction (Crusader Kings III)
+
+Earlier versions incorrectly assigned **Crusader Kings III** Steam App ID **1151640** (actually **Horizon Zero Dawn Complete Edition**). The correct ID is **1158310**.
+
+At startup, SetScout automatically repairs **only** the wrongly named legacy entry in local `games.json`, preserving user-entered reports, clearing the invalid Steam verification, and migrating report/deadline events. Before editing it, SetScout creates `games.json.before-appid-fix.bak`. A genuine Horizon Zero Dawn entry is not modified. The corrected CK3 entry needs a fresh scan.
+
+The checker also compares the title of a recognizable Steam achievements page with the catalogue name. An unrelated title is no longer marked as Steam verified.
+
 ## Your data stays local
 
 On first startup, the server creates **`games.json`** from the included **`games.example.json`**. This local file stores your discovered games, verification history, reports, and activity records. Browser `localStorage` holds your starred watchlist and notification state.

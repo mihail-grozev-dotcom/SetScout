@@ -228,6 +228,12 @@ async function loadData(){
     const r=await fetch('/api/games',{cache:'no-store',signal:AbortSignal.timeout(5000)});if(!r.ok)throw Error('Server offline');
     const data=await r.json();if(!Array.isArray(data.games))throw Error('Malformed catalogue');
     state.backend=true;state.games=data.games;state.candidates=data.candidates||[];state.events=data.events||[];
+    // Transfer a saved star from the legacy wrong CK3 ID only when it is no longer a real Horizon listing.
+    if(state.saved.has('1151640') && state.games.some(g=>g.id===1158310&&g.name==='Crusader Kings III') &&
+       !state.games.some(g=>g.id===1151640)){
+      state.saved.delete('1151640');state.saved.add('1158310');
+      safeStore.set('setscout:saved',[...state.saved]);
+    }
     state.auto=data.auto_enabled!==false;state.autoHours=data.auto_hours||6;state.scan=data.scan||{};
     const previous=state.bulk?.state;state.bulk=data.bulk||{state:'idle'};
     if(previous==='running'&&['completed','cancelled','error'].includes(state.bulk.state))toast(`Bulk scan ${state.bulk.state}: ${state.bulk.completed}/${state.bulk.total} checked.`);
