@@ -766,21 +766,50 @@ def cancel_unverified_scan() -> dict:
 
 
 class Handler(SimpleHTTPRequestHandler):
+    # The project contains private credentials, scan history, and Git metadata.
+    # Never expose arbitrary files through the local web server.
+    PUBLIC_FILES = {'/', '/index.html', '/app.js', '/docs/preview.jpg'}
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(HERE), **kwargs)
+
+    def local_request(self) -> bool:
+        # Reject DNS-rebinding hostnames before serving any content or API data.
+        hosts = self.headers.get_all('Host', [])
+        return len(hosts) == 1 and hosts[0].strip().casefold() in {
+            f'127.0.0.1:{PORT}', f'localhost:{PORT}'}
+
+    def end_headers(self):
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('X-Frame-Options', 'DENY')
+        self.send_header('Referrer-Policy', 'no-referrer')
+        self.send_header('Cross-Origin-Resource-Policy', 'same-origin')
+        super().end_headers()
+
+    def do_HEAD(self):
+        if not self.local_request():
+            return self.send_error(403, 'Invalid local Host')
+        path = urlparse(self.path).path
+        if path not in self.PUBLIC_FILES:
+            return self.send_error(404, 'Not found')
+        return super().do_HEAD()
 
     def json_response(self, data: dict, status: int = 200):
         body = json.dumps(data, ensure_ascii=False).encode('utf-8')
         self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.send_header('Cache-Control', 'no-store')
-        self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
     def do_GET(self):
+        if not self.local_request():
+            return self.send_error(403, 'Invalid local Host')
         path = urlparse(self.path).path
+        if path not in self.PUBLIC_FILES and path not in {
+                '/api/games', '/api/store-index', '/api/bulk-status', '/api/status'}:
+            return self.send_error(404, 'Not found')
         if path == '/api/games':
             db = read_db()
             return self.json_response({**{k: db.get(k) for k in ('games', 'candidates', 'events', 'updated_at', 'auto_enabled', 'auto_hours', 'scan')}, 'bulk': bulk_snapshot(), 'candidate_counts': candidate_counts(db['candidates']), 'store_index': store_index.stats()})
@@ -796,6 +825,8 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_POST(self):
+        if not self.local_request():
+            return self.json_response({'error': 'Invalid local Host'}, 403)
         path = urlparse(self.path).path
         if path not in {'/api/check', '/api/scan', '/api/discover', '/api/settings', '/api/import', '/api/report', '/api/delete-report', '/api/scan-unverified', '/api/scan-pending', '/api/cancel-unverified', '/api/store-sync', '/api/store-scan', '/api/store-stop', '/api/store-auto'}:
             return self.json_response({'error': 'Unknown action'}, 404)
@@ -803,8 +834,9 @@ class Handler(SimpleHTTPRequestHandler):
             if self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json':
                 return self.json_response({'error': 'Content-Type must be application/json'}, 415)
             origin = self.headers.get('Origin', '')
-            if origin and origin not in {f'http://127.0.0.1:{PORT}', f'http://localhost:{PORT}'}:
-                return self.json_response({'error': 'Cross-origin requests are blocked'}, 403)
+            # Browser POST requests must originate from SetScout's own page.
+            if origin not in {f'http://127.0.0.1:{PORT}', f'http://localhost:{PORT}'}:
+                return self.json_response({'error': 'Same-origin browser request required'}, 403)
             length = int(self.headers.get('Content-Length', '0'))
             if not 0 <= length <= 15000:
                 return self.json_response({'error': 'Request too large'}, 413)
