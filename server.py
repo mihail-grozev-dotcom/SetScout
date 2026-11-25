@@ -15,6 +15,7 @@ import re
 import shutil
 import threading
 import store_index
+import alerts
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from html.parser import HTMLParser
@@ -828,7 +829,7 @@ class Handler(SimpleHTTPRequestHandler):
         if not self.local_request():
             return self.json_response({'error': 'Invalid local Host'}, 403)
         path = urlparse(self.path).path
-        if path not in {'/api/check', '/api/scan', '/api/discover', '/api/settings', '/api/import', '/api/report', '/api/delete-report', '/api/scan-unverified', '/api/scan-pending', '/api/cancel-unverified', '/api/store-sync', '/api/store-scan', '/api/store-stop', '/api/store-auto'}:
+        if path not in {'/api/check', '/api/scan', '/api/discover', '/api/settings', '/api/import', '/api/report', '/api/delete-report', '/api/scan-unverified', '/api/scan-pending', '/api/cancel-unverified', '/api/store-sync', '/api/store-scan', '/api/store-stop', '/api/store-auto', '/api/test-alert'}:
             return self.json_response({'error': 'Unknown action'}, 404)
         try:
             if self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json':
@@ -843,6 +844,12 @@ class Handler(SimpleHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b'{}')
             if not isinstance(payload, dict):
                 raise ValueError('Expected JSON object')
+            if path == '/api/test-alert':
+                if not alerts.configured():
+                    return self.json_response({'error': 'Phone push alerts are not configured.'}, 409)
+                if not alerts.test_message():
+                    return self.json_response({'error': 'Phone notification could not be delivered.'}, 502)
+                return self.json_response({'sent': True})
             if path == '/api/store-auto':
                 if not isinstance(payload.get('enabled'), bool):
                     raise ValueError('enabled must be true or false')
