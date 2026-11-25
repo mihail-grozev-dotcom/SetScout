@@ -7,10 +7,13 @@ const safeStore={
 };
 const state={
   games:SEED.games.map(g=>({...g})),candidates:[],pending:safeStore.get('setscout:pending',[]),
-  saved:new Set(safeStore.get('setscout:saved',[]).map(String)),filter:'all',search:'',sort:'az',
+  saved:new Set(safeStore.get('setscout:saved',[]).map(String)),filter:'all',search:'',sort:'az',page:1,
   backend:false,auto:true,autoHours:6,scan:{},bulk:{state:'idle'},store:{},busy:false,detail:null,
   reportGameId:null,reportId:null,events:[],onlyWatchEvents:false
 };
+const PAGE_SIZE=20;
+let catalogueGames=[];
+let catalogueTotal=0;
 const esc=x=>String(x??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot',"'":'&#39;'}[ch]));
 // Escape both quote types for safely inserted attributes.
 function e(x){return esc(x).replace(/&quot(?!;)/g,'&quot;')}
@@ -87,8 +90,49 @@ function renderGame(g){
   return `<article class="game"><div class="cover"><img loading="lazy" src="${imageURL(g)}" alt="" onerror="this.style.display='none'"><button class="mark ${saved?'on':''}" data-save="${g.id}" aria-label="${saved?'Remove saved game':'Save game'}">${saved?'★':'☆'}</button><span class="source-pill">${e(sourceLabel(g))}</span></div>
    <div class="game-body"><h3>${e(g.name)}</h3><div class="appid">Steam App ID · ${Number(g.id)}${g.set_count?` · ${Number(g.set_count)} sets`:''}</div><div class="tags">${types}${flags}</div><div class="temporal-status">${status}</div><div class="date-stamp">${date}${g.last_check_status&&g.last_check_status!=='confirmed'?` · Latest check: ${e(g.last_check_status)}`:''}</div><div class="game-footer"><a href="${steamURL(g)}" target="_blank" rel="noopener">Steam store ↗</a><button data-detail="${g.id}">Track / details →</button></div></div></article>`;
 }
+function pageNumbers(totalPages,currentPage){
+  const chosen=new Set([1,totalPages]);
+  for(let p=Math.max(1,currentPage-2);p<=Math.min(totalPages,currentPage+2);p++)chosen.add(p);
+  if(currentPage<=3)for(let p=1;p<=Math.min(totalPages,5);p++)chosen.add(p);
+  if(currentPage>=totalPages-2)for(let p=Math.max(1,totalPages-4);p<=totalPages;p++)chosen.add(p);
+  const sorted=[...chosen].sort((a,b)=>a-b),result=[];
+  for(const p of sorted){
+    const previous=result[result.length-1];
+    if(previous!==undefined&&previous!==null&&p-previous>1){
+      if(p-previous===2)result.push(previous+1);
+      else result.push(null);
+    }
+    result.push(p);
+  }
+  return result;
+}
+function renderCatalogPage(){
+  const pages=Math.max(1,Math.ceil(catalogueGames.length/PAGE_SIZE));
+  state.page=Math.max(1,Math.min(pages,state.page));
+  const start=(state.page-1)*PAGE_SIZE;
+  const visible=catalogueGames.slice(start,start+PAGE_SIZE);
+  $('filterStatus').textContent=catalogueGames.length
+    ?`Showing ${(start+1).toLocaleString()}–${(start+visible.length).toLocaleString()} of ${catalogueGames.length.toLocaleString()} matching titles (${catalogueTotal.toLocaleString()} in this category)`
+    :'No matching titles';
+  $('grid').innerHTML=visible.length?visible.map(renderGame).join(''):`<div class="empty"><h3>Nothing found</h3><p>Try another filter or add an evidence-backed report for a game.</p><button class="btn" id="clearBtn">Clear filters</button></div>`;
+  if($('clearBtn'))$('clearBtn').onclick=()=>{state.filter='all';state.search='';state.page=1;$('search').value='';render()};
+  const pager=$('pagination');
+  pager.hidden=pages<=1;
+  if(pager.hidden){pager.innerHTML='';return}
+  const pageButtons=pageNumbers(pages,state.page).map(p=>p===null
+    ?'<span class="page-gap" aria-hidden="true">…</span>'
+    :`<button type="button" class="page-button ${p===state.page?'active':''}" data-page="${p}" aria-label="Page ${p}" ${p===state.page?'aria-current="page"':''}>${p.toLocaleString()}</button>`).join('');
+  pager.innerHTML=`<button type="button" class="page-button" data-page="1" ${state.page===1?'disabled':''} aria-label="First page">« First</button>
+    <button type="button" class="page-button" data-page="${state.page-1}" ${state.page===1?'disabled':''} aria-label="Previous page">‹ Prev</button>
+    <div class="page-numbers">${pageButtons}</div>
+    <button type="button" class="page-button" data-page="${state.page+1}" ${state.page===pages?'disabled':''} aria-label="Next page">Next ›</button>
+    <button type="button" class="page-button" data-page="${pages}" ${state.page===pages?'disabled':''} aria-label="Last page">Last »</button>
+    <span class="page-summary">Page ${state.page.toLocaleString()} of ${pages.toLocaleString()} · ${PAGE_SIZE} per page</span>`;
+}
 function render(){
   const games=filtered(),all=itemsForFilter();
+  catalogueGames=games;
+  catalogueTotal=all.length;
   $('heroCount').textContent=state.games.length;
   $('officialCount').textContent=state.games.filter(x=>x.source==='Valve launch list').length;
   $('confirmedCount').textContent=state.games.filter(x=>x.verified).length;
@@ -96,13 +140,11 @@ function render(){
   $('limitedCount').textContent=state.games.reduce((n,g)=>n+temporal(g).active,0);
   $('deadlineCount').textContent=state.games.filter(g=>temporal(g).upcoming).length;
   $('archiveCount').textContent=state.games.filter(g=>temporal(g).archived).length;
-  $('filterStatus').textContent=`Showing ${games.length} of ${all.length} titles`;
   const titles={limited:'Reported active limited-time',deadline:'Upcoming deadlines',archived:'Archive evidence',unknown:'Status unknown',pending:'Awaiting first check',reviewed:'Checked · not confirmed',saved:'My saved games'};
   $('catalogTitle').textContent=titles[state.filter]||'Explore games';
   $('catalogSubtitle').textContent=state.filter==='pending'?'Games awaiting their first Steam check. Scanning moves them into confirmed games or checked candidates.':state.filter==='reviewed'?'Previously checked candidates remain here because a failed or inconclusive scan cannot prove they lack custom sets.':'Click Track / details to add a source-linked time-sensitive report.';
   document.querySelectorAll('#chips [data-filter]').forEach(c=>c.classList.toggle('active',c.dataset.filter===state.filter));
-  $('grid').innerHTML=games.length?games.map(renderGame).join(''):`<div class="empty"><h3>Nothing found</h3><p>Try another filter or add an evidence-backed report for a game.</p><button class="btn" id="clearBtn">Clear filters</button></div>`;
-  if($('clearBtn'))$('clearBtn').onclick=()=>{state.filter='all';state.search='';$('search').value='';render()};
+  renderCatalogPage();
   renderScanner();renderStoreIndex();renderActivity();
 }
 function renderScanner(){
@@ -291,6 +333,20 @@ async function loadData(){
   }
   render();
 }
+async function refreshProgress(){
+  if(!state.backend)return;
+  try{
+    const [sr,br]=await Promise.all([
+      fetch('/api/store-index',{cache:'no-store',signal:AbortSignal.timeout(5000)}),
+      fetch('/api/bulk-status',{cache:'no-store',signal:AbortSignal.timeout(5000)})
+    ]);
+    if(!sr.ok||!br.ok)return;
+    state.store=await sr.json();
+    state.bulk=await br.json();
+    renderStoreIndex();
+    renderScanner();
+  }catch{/* The next full refresh will handle server disconnects. */}
+}
 async function runScan(mode){
   if(!state.backend||state.busy)return;state.busy=true;renderScanner();
   $('scanResults').textContent=mode==='discover'?'Checking up to 8 newly discovered candidates…':'Checking up to 8 listed games for changes…';
@@ -328,11 +384,20 @@ async function stopBulkScan(){
 async function toggleAuto(){try{const r=await post('/api/settings',{auto_enabled:!state.auto});state.auto=r.auto_enabled;renderScanner();toast(state.auto?'Automatic scanning enabled.':'Automatic scanning disabled.')}catch(err){toast(err.message)}}
 async function importIDs(){const b=$('bulkSubmit'),f=$('importFeedback');b.disabled=true;try{const data=await post('/api/import',{text:$('bulkInput').value});f.textContent=`${data.queued} added to queue (${data.received} unique IDs).`;f.classList.add('show');await loadData()}catch(err){f.textContent=err.message;f.classList.add('show')}finally{b.disabled=false}}
 $('grid').addEventListener('click',ev=>{const save=ev.target.closest('[data-save]');if(save){toggleSaved(save.dataset.save);return}const d=ev.target.closest('[data-detail]');if(d)showDetail(d.dataset.detail)});
-$('chips').addEventListener('click',ev=>{const b=ev.target.closest('[data-filter]');if(b){state.filter=b.dataset.filter;render()}});
+$('chips').addEventListener('click',ev=>{const b=ev.target.closest('[data-filter]');if(b){state.filter=b.dataset.filter;state.page=1;render()}});
+$('pagination').addEventListener('click',ev=>{
+  const button=ev.target.closest('button[data-page]');
+  if(!button||button.disabled)return;
+  const page=Number(button.dataset.page);
+  if(!Number.isSafeInteger(page)||page<1)return;
+  state.page=page;
+  renderCatalogPage();
+  $('catalogTitle').scrollIntoView({block:'start'});
+});
 $('activityList').addEventListener('click',ev=>{const b=ev.target.closest('[data-eventgame]');if(b)showDetail(b.dataset.eventgame)});
 $('detailReports').addEventListener('click',ev=>{const edit=ev.target.closest('[data-edit]');const del=ev.target.closest('[data-delete]');if(edit){const g=findGame(edit.dataset.game);const r=reportItems(g).find(x=>x.id===edit.dataset.edit);if(r)addReport(g.id,r)}if(del)deleteReport(del.dataset.delete,del.dataset.game)});
-$('search').addEventListener('input',ev=>{state.search=ev.target.value.trim().toLowerCase();render()});
-$('sort').addEventListener('change',ev=>{state.sort=ev.target.value;render()});
+$('search').addEventListener('input',ev=>{state.search=ev.target.value.trim().toLowerCase();state.page=1;render()});
+$('sort').addEventListener('change',ev=>{state.sort=ev.target.value;state.page=1;render()});
 $('addBtn').onclick=()=>{openModal('addOverlay');$('steamInput').focus()};
 $('checkBtn').onclick=check;
 $('discoverBtn').onclick=()=>runScan('discover');
@@ -364,5 +429,5 @@ document.addEventListener('keydown',ev=>{if(ev.key==='Escape')document.querySele
 render();
 if(location.protocol==='http:'||location.protocol==='https:'){
   loadData();setInterval(()=>{if(!state.busy)loadData()},45000);
-  setInterval(()=>{if(!state.busy&&state.backend&&(state.bulk?.state==='running'||state.store?.sync?.state==='running'||state.store?.scan?.state==='running'))loadData()},1500);
+  setInterval(()=>{if(!state.busy&&state.backend&&(state.bulk?.state==='running'||state.store?.sync?.state==='running'||state.store?.scan?.state==='running'))refreshProgress()},1500);
 }
