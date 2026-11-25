@@ -107,17 +107,26 @@ class BalancedTests(unittest.TestCase):
     def test_pacer_reacts_to_errors_and_recovers(self):
         pace = idx.AdaptivePacer()
         first = pace.delay
+        self.assertEqual(first, idx.SCAN_DELAY)
+        # Healthy responses must never accelerate below the conservative floor.
         for _ in range(idx.SCAN_RECOVERY_COUNT):
             pace.observe('not_detected', '')
-        self.assertLess(pace.delay, first)
+        self.assertGreaterEqual(pace.delay, idx.SCAN_MIN_DELAY)
+        self.assertEqual(pace.delay, first)
+        # Transient server errors increase pacing, and HTTP 404 does not.
         pace.observe('error', 'HTTP 503')
         self.assertGreater(pace.delay, first)
         backoff = pace.delay
         pace.observe('error', 'HTTP 404')
         self.assertEqual(pace.delay, backoff)
+        # Successful checks recover gradually, without violating the floor.
         for _ in range(idx.SCAN_RECOVERY_COUNT):
             pace.observe('confirmed', '')
         self.assertLess(pace.delay, backoff)
+        self.assertGreaterEqual(pace.delay, idx.SCAN_MIN_DELAY)
+        for _ in range(idx.SCAN_RECOVERY_COUNT * 100):
+            pace.observe('confirmed', '')
+        self.assertEqual(pace.delay, idx.SCAN_MIN_DELAY)
 
 
 if __name__ == '__main__':
