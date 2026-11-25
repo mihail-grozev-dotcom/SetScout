@@ -171,7 +171,7 @@ Your old `games.json` and personal reports are unchanged by indexing.
 
 ### Balanced verification (v7)
 
-Full-store verification uses **Balanced mode** by default, for both manual batches and opt-in continuous discovery. Two concurrent network workers share a global adaptive request-start interval (initially 0.9 seconds). Healthy responses gradually decrease the interval to a 0.65-second minimum; transient HTTP 5xx and network errors increase it up to 5 seconds. **HTTP 429 stops the batch, preserves the rate-limited game as pending, and disables automatic discovery until you resume manually.** Only completed observations are committed to SQLite; shutdown or Stop leaves unstarted games pending, and already-checked games are never reset.
+Full-store verification uses **Balanced mode** by default, for both manual batches and opt-in continuous discovery. Two concurrent network workers share a global conservative request-start interval (initially 4 seconds, with a 4-second minimum). Transient HTTP 5xx and network errors increase it up to 12 seconds. **HTTP 429 stops the batch, preserves the rate-limited game as pending, and disables automatic discovery even if the blocked batch was started manually.** Wait for the rate limit to clear before re-enabling; slower pacing is not a guarantee against server-side limits. Only completed observations are committed to SQLite; shutdown or Stop leaves unstarted games pending, and already-checked games are never reset.
 
 The full-store panel shows worker count, current pacing and approximate checked-games-per-hour while a batch runs. This is a cautious improvement, not a promised throughput multiplier or a bypass of Steam rate limits. The 50-game batch limit and Credential Manager key storage remain unchanged.
 
@@ -181,9 +181,10 @@ In **Full Steam store discovery**, click **Continuous discovery: OFF** to opt in
 While the local Python server remains running, SetScout will:
 
 - Resume incomplete full-store indexing automatically using the saved cursor.
-- Check pending indexed games sequentially in batches of 50, with a 1.3-second
-  delay between page requests and a 30-second gap between batches. These limits
-  are conservative defaults, not a guarantee Steam won't rate-limit you.
+- Check pending indexed games in batches of up to 50, with two globally paced
+  workers (at least four seconds between request starts) and a two-minute gap
+  between automatic batches. These limits are conservative defaults, not a
+  guarantee Steam won't rate-limit you.
 - Refresh the completed store catalogue about once a day using Steam's
   `if_modified_since` API parameter. The refresh uses a saved cursor and a
   five-minute overlap so interrupted refreshes can resume without losing
