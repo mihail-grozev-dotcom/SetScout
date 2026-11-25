@@ -175,6 +175,53 @@ Full-store verification uses **Balanced mode** by default, for both manual batch
 
 The full-store panel shows worker count, current pacing and approximate checked-games-per-hour while a batch runs. This is a cautious improvement, not a promised throughput multiplier or a bypass of Steam rate limits. The 50-game batch limit and Credential Manager key storage remain unchanged.
 
+### Steam rate-limit alerts (Linux)
+
+SetScout records every HTTP 429 pause in SQLite, disables continuous verification
+(even if the triggering batch was started manually), and shows a persistent
+warning on the dashboard with the time and remaining pending-game count.
+With browser notification permission granted, it also displays one desktop
+notification for each new pause **while the dashboard is open**.
+
+For notifications even if Windows is off or the dashboard is closed, SetScout
+supports optional [ntfy](https://ntfy.sh/) phone push notifications. No
+additional Python packages, Steam credentials, public SetScout port or
+router port forwarding are required. On the phone, install the ntfy app and
+subscribe to a **private, randomly generated topic** at the `ntfy.sh` server.
+
+**CachyOS/Fish setup on the Linux laptop (systemd user service):**
+
+```fish
+mkdir -p ~/.config/setscout ~/.config/systemd/user/setscout.service.d
+chmod 700 ~/.config/setscout
+
+# Generate an unpredictable topic. Copy the printed topic into the ntfy app
+# on the phone, using https://ntfy.sh as the server.
+set topic (python3 -c 'import secrets; print("setscout-" + secrets.token_urlsafe(32))')
+echo "Subscribe in the ntfy app on ntfy.sh to topic: $topic"
+
+# Encrypt the topic for the existing systemd user service. It stays outside Git.
+printf '%s' "$topic" | systemd-creds encrypt --user --name=setscout-alert-topic - ~/.config/setscout/alert-topic.cred
+set --erase topic
+chmod 600 ~/.config/setscout/alert-topic.cred
+
+printf '%s\n' '[Service]' 'LoadCredentialEncrypted=setscout-alert-topic:%h/.config/setscout/alert-topic.cred' > ~/.config/systemd/user/setscout.service.d/notifications.conf
+systemctl --user daemon-reload
+systemctl --user restart setscout.service
+```
+
+Once configured, the dashboard displays **Test phone alert**. Click it
+and confirm the message arrives on your phone. Every new full-store HTTP 429
+pause then publishes *one* alert, including the pending count; failures to
+deliver an optional alert never interrupt the database or scan safety logic.
+The message will not include your Steam Web API key or sensitive game history.
+
+**Privacy:** ntfy.sh is a third-party service; a default ntfy topic is
+not authenticated. Anyone who learns its topic string can read or send
+messages to it. Use only an unpredictable topic and keep it private.
+The encrypted credential file is machine/user-bound and is not stored in the
+public SetScout Git repository. The topic is used only for these opt-in alerts.
+
 ### Continuous store discovery (v6)
 
 In **Full Steam store discovery**, click **Continuous discovery: OFF** to opt in.
