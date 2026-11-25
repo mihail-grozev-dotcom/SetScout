@@ -116,18 +116,19 @@ function renderCatalogPage(){
     :'No matching titles';
   $('grid').innerHTML=visible.length?visible.map(renderGame).join(''):`<div class="empty"><h3>Nothing found</h3><p>Try another filter or add an evidence-backed report for a game.</p><button class="btn" id="clearBtn">Clear filters</button></div>`;
   if($('clearBtn'))$('clearBtn').onclick=()=>{state.filter='all';state.search='';state.page=1;$('search').value='';render()};
-  const pager=$('pagination');
-  pager.hidden=pages<=1;
-  if(pager.hidden){pager.innerHTML='';return}
+  const pagers=[$('paginationTop'),$('pagination')];
+  for(const pager of pagers){pager.hidden=pages<=1;if(pager.hidden)pager.innerHTML='';}
+  if(pages<=1)return;
   const pageButtons=pageNumbers(pages,state.page).map(p=>p===null
     ?'<span class="page-gap" aria-hidden="true">…</span>'
     :`<button type="button" class="page-button ${p===state.page?'active':''}" data-page="${p}" aria-label="Page ${p}" ${p===state.page?'aria-current="page"':''}>${p.toLocaleString()}</button>`).join('');
-  pager.innerHTML=`<button type="button" class="page-button" data-page="1" ${state.page===1?'disabled':''} aria-label="First page">« First</button>
+  const pagerHTML=`<button type="button" class="page-button" data-page="1" ${state.page===1?'disabled':''} aria-label="First page">« First</button>
     <button type="button" class="page-button" data-page="${state.page-1}" ${state.page===1?'disabled':''} aria-label="Previous page">‹ Prev</button>
     <div class="page-numbers">${pageButtons}</div>
     <button type="button" class="page-button" data-page="${state.page+1}" ${state.page===pages?'disabled':''} aria-label="Next page">Next ›</button>
     <button type="button" class="page-button" data-page="${pages}" ${state.page===pages?'disabled':''} aria-label="Last page">Last »</button>
     <span class="page-summary">Page ${state.page.toLocaleString()} of ${pages.toLocaleString()} · ${PAGE_SIZE} per page</span>`;
+  for(const pager of pagers)pager.innerHTML=pagerHTML;
 }
 function render(){
   const games=filtered(),all=itemsForFilter();
@@ -385,15 +386,17 @@ async function toggleAuto(){try{const r=await post('/api/settings',{auto_enabled
 async function importIDs(){const b=$('bulkSubmit'),f=$('importFeedback');b.disabled=true;try{const data=await post('/api/import',{text:$('bulkInput').value});f.textContent=`${data.queued} added to queue (${data.received} unique IDs).`;f.classList.add('show');await loadData()}catch(err){f.textContent=err.message;f.classList.add('show')}finally{b.disabled=false}}
 $('grid').addEventListener('click',ev=>{const save=ev.target.closest('[data-save]');if(save){toggleSaved(save.dataset.save);return}const d=ev.target.closest('[data-detail]');if(d)showDetail(d.dataset.detail)});
 $('chips').addEventListener('click',ev=>{const b=ev.target.closest('[data-filter]');if(b){state.filter=b.dataset.filter;state.page=1;render()}});
-$('pagination').addEventListener('click',ev=>{
+function onPageClick(ev){
   const button=ev.target.closest('button[data-page]');
   if(!button||button.disabled)return;
   const page=Number(button.dataset.page);
-  if(!Number.isSafeInteger(page)||page<1)return;
+  const maxPage=Math.max(1,Math.ceil(catalogueGames.length/PAGE_SIZE));
+  if(!Number.isSafeInteger(page)||page<1||page>maxPage)return;
   state.page=page;
   renderCatalogPage();
   $('catalogTitle').scrollIntoView({block:'start'});
-});
+}
+for(const id of ['paginationTop','pagination'])$(id).addEventListener('click',onPageClick);
 $('activityList').addEventListener('click',ev=>{const b=ev.target.closest('[data-eventgame]');if(b)showDetail(b.dataset.eventgame)});
 $('detailReports').addEventListener('click',ev=>{const edit=ev.target.closest('[data-edit]');const del=ev.target.closest('[data-delete]');if(edit){const g=findGame(edit.dataset.game);const r=reportItems(g).find(x=>x.id===edit.dataset.edit);if(r)addReport(g.id,r)}if(del)deleteReport(del.dataset.delete,del.dataset.game)});
 $('search').addEventListener('input',ev=>{state.search=ev.target.value.trim().toLowerCase();state.page=1;render()});
