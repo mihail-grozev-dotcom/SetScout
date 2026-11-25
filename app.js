@@ -181,6 +181,20 @@ function renderScanner(){
   const feeds=Object.entries(src).map(([name,x])=>`${e(name)}: ${x.ok?`${Number(x.seen||0)} candidates`:'unavailable'}`).join(' · ');
   $('scanInfo').innerHTML=`<strong>Last scan:</strong> ${e(timeLabel(state.scan?.last_run))} · <strong>Awaiting check:</strong> ${pending} · <strong>Checked, not detected:</strong> ${checked} · <strong>Check errors/mismatches:</strong> ${errors} · <strong>Automatic:</strong> 8 candidates + 8 known games every ${state.autoHours}h while Python is running.${feeds?`<div>${feeds}</div>`:''}`;
 }
+function notifyStoreRateLimit(info){
+  if(info?.auto_enabled || !String(info?.auto_pause_reason||'').includes('HTTP 429'))return;
+  const stamp=String(info.rate_limit_at||'');
+  if(!stamp)return;
+  const key='setscout:last-429-browser-alert';
+  if(safeStore.get(key,'')===stamp)return;
+  safeStore.set(key,stamp);
+  const msg='Steam returned HTTP 429; automatic scanning has stopped. ' +
+    Number(info.pending||0).toLocaleString()+' games remain pending.';
+  toast(msg);
+  if('Notification' in window && Notification.permission==='granted'){
+    try{new Notification('SetScout · verification paused',{body:msg})}catch{}
+  }
+}
 function renderStoreIndex(){
   const x=state.store||{},sync=x.sync||{},scan=x.scan||{},active=sync.state==='running'||scan.state==='running';
   $('storeKeyBadge').textContent=!state.backend?'SERVER OFFLINE':x.key_configured?'KEY CONFIGURED':'API KEY MISSING';
@@ -188,6 +202,17 @@ function renderStoreIndex(){
   $('storeSyncBtn').textContent=x.index_complete?'Refresh Steam catalogue':'Index / resume store catalogue';
   $('storeAutoBtn').disabled=!state.backend||!x.key_configured;
   $('storeAutoBtn').textContent=x.auto_enabled?'● Continuous discovery: ON':'○ Continuous discovery: OFF';
+  const ratePaused=!x.auto_enabled&&String(x.auto_pause_reason||'').includes('HTTP 429');
+  $('storeRateAlert').hidden=!ratePaused;
+  if(ratePaused){
+    $('storeRateAlertDetails').textContent=`Steam refused further checks${x.rate_limit_at?' on '+timeLabel(x.rate_limit_at):''}. ${Number(x.pending||0).toLocaleString()} games remain pending; completed results are safe. Allow time for Steam's limit to clear before resuming.`;
+    $('storeRateAlertDelivery').textContent=x.push_alerts_configured
+      ?'Phone push alerts are enabled. Browser notifications also work if this page is open and permission is granted.'
+      :'Browser notifications require this page to remain open. Optional phone push alerts can be enabled for unattended scanning.';
+  }
+  $('storeTestAlertBtn').hidden=!x.push_alerts_configured;
+  $('storeTestAlertBtn').disabled=!state.backend;
+  notifyStoreRateLimit(x);
   $('storeScanBtn').disabled=!state.backend||active||!x.pending;
   $('storeStopBtn').disabled=!state.backend||!active;
   $('storeStats').textContent=`Indexed: ${Number(x.total||0).toLocaleString()} games · Not checked: ${Number(x.pending||0).toLocaleString()} · Verified sets: ${Number(x.confirmed||0)} · Checked without evidence: ${Number(x.not_detected||0)} · Errors: ${Number(x.errors||0)} · ${x.index_complete?'Full index complete':'Initial index incomplete'}${x.last_refresh?' · Last refresh: '+timeLabel(x.last_refresh):''}`;
@@ -200,6 +225,15 @@ function renderStoreIndex(){
     $('storeProgressText').textContent=`Balanced verification${scan.automatic?' (automatic)':''}: ${scan.checked||0}/${scan.total||0} checked · ${scan.confirmed||0} confirmed · ${scan.workers||2} workers · ${Number(scan.pacing_seconds??0.9).toFixed(2)}s pacing${scan.games_per_hour?` · ~${Number(scan.games_per_hour).toLocaleString()}/hour`:''}${scan.state==='rate_limited'?' · Steam rate limited; pending game preserved':''}`;
     $('storeMeter').value=scan.checked||0;$('storeMeter').max=Math.max(1,scan.total||1);
   }
+}
+async function testPhoneAlert(){
+  const btn=$('storeTestAlertBtn');
+  btn.disabled=true;
+  try{
+    const result=await post('/api/test-alert',{});
+    if(result.sent)toast('Test notification sent. Check your subscribed phone.');
+  }catch(err){toast('Test alert: '+err.message)}
+  finally{btn.disabled=false}
 }
 async function storeCommand(action){
   const paths={sync:'/api/store-sync',scan:'/api/store-scan',stop:'/api/store-stop'};
@@ -411,6 +445,7 @@ $('storeSyncBtn').onclick=()=>storeCommand('sync');
 $('storeScanBtn').onclick=()=>storeCommand('scan');
 $('storeStopBtn').onclick=()=>storeCommand('stop');
 $('storeAutoBtn').onclick=toggleStoreAuto;
+$('storeTestAlertBtn').onclick=testPhoneAlert;
 $('cancelAllBtn').onclick=stopBulkScan;
 $('autoBtn').onclick=toggleAuto;
 $('importBtn').onclick=()=>openModal('importOverlay');
