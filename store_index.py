@@ -20,6 +20,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from steam_credentials import get_api_key
+import alerts
 
 HERE = Path(__file__).resolve().parent
 DB_PATH = HERE / 'steam_catalog.sqlite3'
@@ -95,6 +96,8 @@ def stats() -> dict:
                     'confirmed': confirmed, 'not_detected': other, 'errors': errors,
                     'auto_enabled': meta(con, 'auto_enabled', '0') == '1',
                     'auto_pause_reason': meta(con, 'auto_pause_reason'),
+                    'rate_limit_at': meta(con, 'rate_limit_at'),
+                    'push_alerts_configured': alerts.configured(),
                     'last_auto_batch': meta(con, 'last_auto_batch'),
                     'last_refresh': meta(con, 'last_refresh'),
                     'cursor': int(meta(con, 'cursor', '0')),
@@ -321,6 +324,7 @@ def _scan_worker(items, check_game, save_result, automatic=False):
     items_iter = iter(items)
     exhausted = False
     halted = False
+    notified_for_batch = False
     try:
         with ThreadPoolExecutor(max_workers=SCAN_WORKERS, thread_name_prefix='setscout-balanced') as pool:
             while waiting or not exhausted:
@@ -360,6 +364,8 @@ def _scan_worker(items, check_game, save_result, automatic=False):
                             except Exception as exc:
                                 status = 'error'
                                 note = 'SaveError: ' + type(exc).__name__
+                        send_alert = limited and not notified_for_batch
+                        pending_count = 0
                         with LOCK, open_db() as con:
                             if not limited:
                                 con.execute('UPDATE apps SET status=?,checked_at=?,note=? WHERE appid=?',
@@ -371,12 +377,22 @@ def _scan_worker(items, check_game, save_result, automatic=False):
                             if limited:
                                 halted = True
                                 SCAN['state'] = 'rate_limited'
-                                # Also disable automation when a manually started scan hits a
-                                # limit. Otherwise continuous mode could launch another batch.
+                                # Any 429 (including a manual batch) must stop automation.
                                 set_meta(con, 'auto_enabled', '0')
                                 set_meta(con, 'auto_pause_reason',
                                          'Steam returned HTTP 429. Wait for the limit to clear before manually re-enabling continuous verification.')
+                                if send_alert:
+                                    set_meta(con, 'rate_limit_at',
+                                             dt.datetime.now(dt.timezone.utc).isoformat())
+                                    pending_count = con.execute(
+                                        "SELECT COUNT(*) FROM apps WHERE status='pending'"
+                                    ).fetchone()[0]
                             con.commit()
+                        if send_alert:
+                            notified_for_batch = True
+                            # Network failures in an optional push provider must not
+                            # affect saved progress or re-enable scanning.
+                            alerts.rate_limited(pending_count)
                         if not limited:
                             previous_delay = pace.delay
                             pace.observe(status, note)
@@ -443,7 +459,8 @@ def set_auto_enabled(enabled: bool) -> dict:
         raise ValueError('A Steam Web API key is required before enabling continuous discovery.')
     with LOCK, open_db() as con:
         set_meta(con, 'auto_enabled', '1' if enabled else '0')
-        set_meta(con, 'auto_pause_reason', '')
+        if enabled:
+            set_meta(con, 'auto_pause_reason', '')
         con.commit()
         if not enabled and SCAN.get('automatic') and SCAN.get('state') == 'running':
             STOP_SCAN.set()
