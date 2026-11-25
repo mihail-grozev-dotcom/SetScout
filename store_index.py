@@ -30,12 +30,12 @@ SYNC_PAGES_PER_RUN = 24
 SCAN_LIMIT = 50
 # Balanced verification: two network workers, with globally paced requests.
 SCAN_WORKERS = 2
-SCAN_DELAY = 0.9              # Starting interval between requests, not per worker.
-SCAN_MIN_DELAY = 0.65         # Fastest adaptive interval on healthy responses.
-SCAN_MAX_DELAY = 5.0          # Back off on transient Steam/network failures.
+SCAN_DELAY = 4.0              # Conservative starting interval between requests (shared across workers).
+SCAN_MIN_DELAY = 4.0          # Do not accelerate below this interval after healthy responses.
+SCAN_MAX_DELAY = 12.0         # Back off further on transient Steam/network failures.
 SCAN_RECOVERY_COUNT = 12      # Gradual recovery; never bypass HTTP 429 stopping.
 AUTO_POLL_SECONDS = 12
-AUTO_BATCH_GAP_SECONDS = 30
+AUTO_BATCH_GAP_SECONDS = 120
 AUTO_REFRESH_SECONDS = 24 * 3600
 REFRESH_OVERLAP_SECONDS = 300
 LOCK = threading.RLock()
@@ -371,10 +371,11 @@ def _scan_worker(items, check_game, save_result, automatic=False):
                             if limited:
                                 halted = True
                                 SCAN['state'] = 'rate_limited'
-                                if automatic:
-                                    set_meta(con, 'auto_enabled', '0')
-                                    set_meta(con, 'auto_pause_reason',
-                                             'Steam returned HTTP 429. Resume automatic verification manually when the limit clears.')
+                                # Also disable automation when a manually started scan hits a
+                                # limit. Otherwise continuous mode could launch another batch.
+                                set_meta(con, 'auto_enabled', '0')
+                                set_meta(con, 'auto_pause_reason',
+                                         'Steam returned HTTP 429. Wait for the limit to clear before manually re-enabling continuous verification.')
                             con.commit()
                         if not limited:
                             previous_delay = pace.delay
