@@ -77,6 +77,26 @@ class StoreIndexTests(unittest.TestCase):
             self.assertEqual(calls,[0,10])
             self.assertEqual(idx.stats()['total'],2)
             self.assertTrue(idx.stats()['index_complete'])
+    def test_manual_rate_limit_preserves_pending_and_pauses_automation(self):
+        idx.import_page([(429, 'Rate-limited game', 0)], 429, False)
+        with idx.LOCK, idx.open_db() as con:
+            idx.set_meta(con, 'auto_enabled', '1')
+            con.commit()
+        def checker(appid, item):
+            return {'id': appid, 'status': 'error', 'reason': 'HTTP 429: Too Many Requests'}
+        with patch.object(idx, 'SCAN_DELAY', 0), patch.object(idx, 'SCAN_WORKERS', 1):
+            idx.start_scan(set(), checker, lambda result, original: None)
+            for _ in range(300):
+                if not idx.SCAN_LOCK.locked():
+                    break
+                time.sleep(.01)
+        self.assertFalse(idx.SCAN_LOCK.locked())
+        self.assertEqual(idx.SCAN['state'], 'rate_limited')
+        stats = idx.stats()
+        self.assertEqual(stats['pending'], 1)
+        self.assertFalse(stats['auto_enabled'])
+        self.assertIn('HTTP 429', stats['auto_pause_reason'])
+
     def test_scan_persists_and_does_not_promote_nonmatches(self):
         idx.import_page([(1,'One',0),(2,'Two',0),(3,'Three',0)],3,False)
         saved=[]
