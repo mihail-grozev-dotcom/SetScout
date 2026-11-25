@@ -84,18 +84,21 @@ class StoreIndexTests(unittest.TestCase):
             con.commit()
         def checker(appid, item):
             return {'id': appid, 'status': 'error', 'reason': 'HTTP 429: Too Many Requests'}
-        with patch.object(idx, 'SCAN_DELAY', 0), patch.object(idx, 'SCAN_WORKERS', 1):
+        with patch.object(idx, 'SCAN_DELAY', 0), patch.object(idx, 'SCAN_WORKERS', 1), \
+                patch.object(idx.alerts, 'rate_limited') as notification:
             idx.start_scan(set(), checker, lambda result, original: None)
             for _ in range(300):
                 if not idx.SCAN_LOCK.locked():
                     break
                 time.sleep(.01)
+            notification.assert_called_once_with(1)
         self.assertFalse(idx.SCAN_LOCK.locked())
         self.assertEqual(idx.SCAN['state'], 'rate_limited')
         stats = idx.stats()
         self.assertEqual(stats['pending'], 1)
         self.assertFalse(stats['auto_enabled'])
         self.assertIn('HTTP 429', stats['auto_pause_reason'])
+        self.assertTrue(stats['rate_limit_at'])
 
     def test_scan_persists_and_does_not_promote_nonmatches(self):
         idx.import_page([(1,'One',0),(2,'Two',0),(3,'Three',0)],3,False)
